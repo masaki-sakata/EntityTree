@@ -105,21 +105,23 @@ class HTMLTreeEncoding:
         """HTML を生成。open_browser=True で自動表示。"""
         self._add_nodes_edges()
 
-        # ツリー表示用オプション
+        # ツリー表示用オプション（純粋な JSON 形式）
         self.net.set_options(
             """
-var options = {
-  layout: {
-    hierarchical: {
-      enabled: true,
-      direction: "UD",      // 上→下。横型なら "LR"
-      levelSeparation: 120, // 階層間の縦間隔
-      nodeSpacing: 200,     // 同階層ノード間の横間隔
-      treeSpacing: 200,
-      sortMethod: "directed"
+{
+  "layout": {
+    "hierarchical": {
+      "enabled": true,
+      "direction": "UD",
+      "levelSeparation": 120,
+      "nodeSpacing": 200,
+      "treeSpacing": 200,
+      "sortMethod": "directed"
     }
   },
-  physics: false            // 動きを固定
+  "physics": {
+    "enabled": false
+  }
 }
 """
         )

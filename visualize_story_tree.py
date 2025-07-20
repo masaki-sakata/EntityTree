@@ -69,7 +69,8 @@ def run(args):
     )
 
     # 9) 可視化
-    highlights = set(trimming_summary) | set(kcenter_summary) | set(important)
+    # highlights = set(trimming_summary) | set(kcenter_summary) | set(important)
+    highlights = None
 
     TE = TreeEncoding(                  
         adjacency=adjacency,

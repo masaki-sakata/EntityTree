@@ -88,7 +88,7 @@
                   
 
                   // parsing and collecting nodes and edges from the python
-                  nodes = new vis.DataSet([{"color": "grey", "id": 9, "label": "9", "physics": false, "shape": "dot", "title": "9"}, {"color": "red", "id": 1, "label": "Margaret Thatcher", "physics": false, "shape": "dot", "title": "Margaret Thatcher"}, {"color": "orange", "id": 2, "label": "Winston Churchill", "physics": false, "shape": "dot", "title": "Winston Churchill"}, {"color": "grey", "id": 10, "label": "10", "physics": false, "shape": "dot", "title": "10"}, {"color": "red", "id": 4, "label": "Denzel Washington", "physics": false, "shape": "dot", "title": "Denzel Washington"}, {"color": "orange", "id": 5, "label": "Tom Hanks", "physics": false, "shape": "dot", "title": "Tom Hanks"}, {"color": "grey", "id": 11, "label": "11", "physics": false, "shape": "dot", "title": "11"}, {"color": "red", "id": 3, "label": "Meryl Streep", "physics": false, "shape": "dot", "title": "Meryl Streep"}, {"color": "grey", "id": 12, "label": "12", "physics": false, "shape": "dot", "title": "12"}, {"color": "orange", "id": 6, "label": "Michael Jordan", "physics": false, "shape": "dot", "title": "Michael Jordan"}, {"color": "orange", "id": 7, "label": "Lionel Messi", "physics": false, "shape": "dot", "title": "Lionel Messi"}, {"color": "grey", "id": 13, "label": "13", "physics": false, "shape": "dot", "title": "13"}, {"color": "red", "id": 0, "label": "Barack Obama", "physics": false, "shape": "dot", "title": "Barack Obama"}, {"color": "grey", "id": 14, "label": "14", "physics": false, "shape": "dot", "title": "14"}, {"color": "grey", "id": 15, "label": "15", "physics": false, "shape": "dot", "title": "15"}, {"color": "orange", "id": 8, "label": "Usain Bolt", "physics": false, "shape": "dot", "title": "Usain Bolt"}, {"color": "grey", "id": 16, "label": "16", "physics": false, "shape": "dot", "title": "16"}]);
+                  nodes = new vis.DataSet([{"color": "grey", "id": 9, "label": "9", "level": 4, "physics": false, "shape": "dot", "title": "9"}, {"color": "red", "id": 1, "label": "Margaret Thatcher", "level": 5, "physics": false, "shape": "dot", "title": "Margaret Thatcher"}, {"color": "orange", "id": 2, "label": "Winston Churchill", "level": 5, "physics": false, "shape": "dot", "title": "Winston Churchill"}, {"color": "grey", "id": 10, "label": "10", "level": 2, "physics": false, "shape": "dot", "title": "10"}, {"color": "red", "id": 4, "label": "Denzel Washington", "level": 3, "physics": false, "shape": "dot", "title": "Denzel Washington"}, {"color": "orange", "id": 5, "label": "Tom Hanks", "level": 3, "physics": false, "shape": "dot", "title": "Tom Hanks"}, {"color": "grey", "id": 11, "label": "11", "level": 1, "physics": false, "shape": "dot", "title": "11"}, {"color": "red", "id": 3, "label": "Meryl Streep", "level": 2, "physics": false, "shape": "dot", "title": "Meryl Streep"}, {"color": "grey", "id": 12, "label": "12", "level": 3, "physics": false, "shape": "dot", "title": "12"}, {"color": "orange", "id": 6, "label": "Michael Jordan", "level": 4, "physics": false, "shape": "dot", "title": "Michael Jordan"}, {"color": "orange", "id": 7, "label": "Lionel Messi", "level": 4, "physics": false, "shape": "dot", "title": "Lionel Messi"}, {"color": "grey", "id": 13, "label": "13", "level": 3, "physics": false, "shape": "dot", "title": "13"}, {"color": "red", "id": 0, "label": "Barack Obama", "level": 4, "physics": false, "shape": "dot", "title": "Barack Obama"}, {"color": "grey", "id": 14, "label": "14", "level": 2, "physics": false, "shape": "dot", "title": "14"}, {"color": "grey", "id": 15, "label": "15", "level": 1, "physics": false, "shape": "dot", "title": "15"}, {"color": "orange", "id": 8, "label": "Usain Bolt", "level": 2, "physics": false, "shape": "dot", "title": "Usain Bolt"}, {"color": "grey", "id": 16, "label": "16", "level": 0, "physics": false, "shape": "dot", "title": "16"}]);
                   edges = new vis.DataSet([{"arrows": "to", "from": 9, "to": 1}, {"arrows": "to", "from": 9, "to": 2}, {"arrows": "to", "from": 10, "to": 4}, {"arrows": "to", "from": 10, "to": 5}, {"arrows": "to", "from": 11, "to": 3}, {"arrows": "to", "from": 11, "to": 10}, {"arrows": "to", "from": 12, "to": 6}, {"arrows": "to", "from": 12, "to": 7}, {"arrows": "to", "from": 13, "to": 0}, {"arrows": "to", "from": 13, "to": 9}, {"arrows": "to", "from": 14, "to": 13}, {"arrows": "to", "from": 14, "to": 12}, {"arrows": "to", "from": 15, "to": 14}, {"arrows": "to", "from": 15, "to": 8}, {"arrows": "to", "from": 16, "to": 15}, {"arrows": "to", "from": 16, "to": 11}]);
 
                   nodeColors = {};
@@ -100,35 +100,7 @@
                   // adding nodes and edges to the graph
                   data = {nodes: nodes, edges: edges};
 
-                  var options = {
-    "configure": {
-        "enabled": false
-    },
-    "edges": {
-        "color": {
-            "inherit": true
-        },
-        "smooth": {
-            "enabled": true,
-            "type": "dynamic"
-        }
-    },
-    "interaction": {
-        "dragNodes": true,
-        "hideEdgesOnDrag": false,
-        "hideNodesOnDrag": false
-    },
-    "physics": {
-        "enabled": true,
-        "stabilization": {
-            "enabled": true,
-            "fit": true,
-            "iterations": 1000,
-            "onlyDynamicEdges": false,
-            "updateInterval": 50
-        }
-    }
-};
+                  var options = {"layout": {"hierarchical": {"enabled": true, "direction": "UD", "levelSeparation": 120, "nodeSpacing": 200, "treeSpacing": 200, "sortMethod": "directed"}}, "physics": {"enabled": false}};
 
                   
 

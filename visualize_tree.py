@@ -92,7 +92,7 @@ def run(args):
             device=args.device,
         )
         inspect_model = EmbeddingModel(inspect_cfg)
-        target_layers = range(inspect_model.num_layers)
+        target_layers = range(inspect_model.num_layers + 1)
     else:
         target_layers = [int(args.layer)]
 

@@ -1,8 +1,6 @@
 
-# MODEL="gpt2"
 MODEL="meta-llama/Meta-Llama-3-8B"
 METHOD=last_token
-
 DEVICE=cuda:0
 
 INPUT="./input/sample_text.txt"
@@ -21,6 +19,7 @@ poetry run python3 visualize_tree.py \
 MODEL="gpt2"
 METHOD=last_token
 DEVICE=cuda:0
+
 INPUT="./input/sample_text.txt"
 OUTPUT="./output/${MODEL}"
 poetry run python3 visualize_tree.py \
@@ -29,7 +28,6 @@ poetry run python3 visualize_tree.py \
     --model ${MODEL} \
     --method ${METHOD} \
     --device ${DEVICE} 
-    
 
 
 

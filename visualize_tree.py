@@ -27,6 +27,7 @@ import argparse
 import json
 from pathlib import Path
 from typing import Sequence
+import pandas as pd
 
 import numpy as np
 
@@ -43,14 +44,8 @@ import summarization
 def build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Build Tree and export HTML")
     p.add_argument("--input", required=True, help="Input text file")
-    p.add_argument(
-        "--output",
-        default="tree.html",
-        help=(
-            "出力ディレクトリまたはファイル名。"
-            "ディレクトリを渡すと /layerX/tree.html 形式で保存する"
-        ),
-    )
+    p.add_argument("--output_dir", required=True, help="Output directory for HTML files")
+    p.add_argument("--output_file_name", required=True, help="Output file name (without .html)")
 
     # Embedding params --------------------------------------------------------
     p.add_argument(
@@ -73,7 +68,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 # Helper                                                                      #
 # --------------------------------------------------------------------------- #
 
-def build_output_path(base: Path, layer_idx: int | None) -> Path:
+def build_output_path(base: Path, layer_idx: int | None, file_name: str) -> Path:
     """Generate an output ``.html`` file path for the given layer index."""
     if base.suffix.lower() == ".html":
         # User passed a file path directly → reuse as‑is
@@ -82,7 +77,7 @@ def build_output_path(base: Path, layer_idx: int | None) -> Path:
     # Directory was supplied → create per‑layer sub‑directory
     layer_dir = base / f"layer{layer_idx}"
     layer_dir.mkdir(parents=True, exist_ok=True)
-    return layer_dir / "tree.html"
+    return layer_dir / f"{file_name}.html"
 
 
 # --------------------------------------------------------------------------- #
@@ -143,9 +138,13 @@ def _encode_sentences(
 
 def run(args) -> None:
     # 1) Load & preprocess ----------------------------------------------------
-    text = Path(args.input).read_text(encoding="utf8")
-    _, sents, prep_sents = util.get_text_data(text, module="nltk")
-    sentences = [" ".join(toks) for toks in prep_sents]
+    input_path = Path(args.input)
+    # Load the JSONL file into a DataFrame and filter entity rows
+    df = pd.read_json(str(input_path), lines=True)
+    df = df[df["is_entity"] == True]
+    # Extract wiki_title strings as our input sentences
+    sentences = df["wiki_title"].fillna("").tolist()
+
 
     # 2) Embed sentences (single forward pass when possible) -----------------
     all_embs, target_layers = _encode_sentences(
@@ -156,7 +155,7 @@ def run(args) -> None:
         device=args.device,
     )
 
-    base_out = Path(args.output)
+    base_out = Path(args.output_dir)
 
     # 3) Build & export Tree per layer -----------------------------------
     for out_idx, l_idx in enumerate(target_layers):
@@ -184,11 +183,11 @@ def run(args) -> None:
             n_leaves=n_leaves,
             n_nodes=n_nodes,
             highlights=highlights,
-            labels={idx: sent for idx, sent in enumerate(sents)},
+            labels={idx: sent for idx, sent in enumerate(sentences)},
         )
 
         # 4) Output ---------------------------------------------------------
-        out_path = build_output_path(base_out, l_idx)
+        out_path = build_output_path(base_out, l_idx, args.output_file_name)
         tree_encoder.draw(str(out_path))
         print(f"[DONE] layer {l_idx}: wrote {out_path}")
 

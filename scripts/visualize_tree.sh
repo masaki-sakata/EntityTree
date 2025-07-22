@@ -14,7 +14,8 @@ poetry run python3 visualize_tree.py \
     --output_file_name ${OUTPUT_FILE_NAME} \
     --model ${MODEL} \
     --method ${METHOD} \
-    --device ${DEVICE} 
+    --device ${DEVICE} \
+    --export_png
     
 
 
@@ -32,7 +33,8 @@ poetry run python3 visualize_tree.py \
     --output_file_name ${OUTPUT_FILE_NAME} \
     --model ${MODEL} \
     --method ${METHOD} \
-    --device ${DEVICE} 
+    --device ${DEVICE} \
+    --export_png
 
 
 
@@ -49,5 +51,6 @@ poetry run python3 visualize_tree.py \
     --output_file_name ${OUTPUT_FILE_NAME} \
     --model ${MODEL} \
     --method ${METHOD} \
-    --device ${DEVICE} 
+    --device ${DEVICE} \
+    --export_png
     

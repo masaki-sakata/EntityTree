@@ -130,3 +130,6 @@ dmypy.json
 
 output
 view_html.ipynb
+
+.RData
+.Rhistory

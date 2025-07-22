@@ -528,36 +528,82 @@ def compute_tree_distances_python_fallback(gold_newick: str, pred_newick: str) -
     print("Computing basic tree distances using Python fallback...")
     
     try:
-        # Parse trees (basic implementation)
-        gold_leaves = extract_leaves_from_newick(gold_newick)
-        pred_leaves = extract_leaves_from_newick(pred_newick)
+        # Parse tree structures (not just leaves)
+        gold_structure = parse_tree_structure(gold_newick)
+        pred_structure = parse_tree_structure(pred_newick)
         
-        # Simple leaf set comparison
-        gold_set = set(gold_leaves)
-        pred_set = set(pred_leaves)
+        print(f"Gold tree clusters: {len(gold_structure['clusters'])}")
+        print(f"Pred tree clusters: {len(pred_structure['clusters'])}")
         
-        # Basic metrics
-        intersection = len(gold_set & pred_set)
-        union = len(gold_set | pred_set)
-        jaccard = intersection / union if union > 0 else 0.0
+        # Get all leaves
+        all_leaves = set(gold_structure['leaves']) | set(pred_structure['leaves'])
+        n_leaves = len(all_leaves)
         
-        # Symmetric difference (similar to Robinson-Foulds concept)
-        symmetric_diff = len(gold_set ^ pred_set)
+        if n_leaves == 0:
+            return {metric: np.nan for metric in ['JRF_k1', 'JRF_k2', 'MatchingSplit', 'PhylogeneticInfo', 'ClusteringInfo', 'PathDistance']}
+        
+        # Compute clustering-based distances
+        
+        # 1. Robinson-Foulds style: compare splits
+        gold_splits = get_tree_splits(gold_structure)
+        pred_splits = get_tree_splits(pred_structure)
+        
+        # Convert splits to comparable format
+        gold_split_set = set()
+        pred_split_set = set()
+        
+        for split in gold_splits:
+            if len(split) > 1 and len(split) < n_leaves:  # Non-trivial splits
+                gold_split_set.add(frozenset(split))
+        
+        for split in pred_splits:
+            if len(split) > 1 and len(split) < n_leaves:  # Non-trivial splits
+                pred_split_set.add(frozenset(split))
+        
+        # Robinson-Foulds distance
+        symmetric_diff = len(gold_split_set ^ pred_split_set)
+        total_splits = len(gold_split_set | pred_split_set)
+        rf_distance = symmetric_diff
+        
+        # Jaccard-based distance
+        intersection = len(gold_split_set & pred_split_set)
+        union = len(gold_split_set | pred_split_set)
+        jaccard_sim = intersection / union if union > 0 else 0.0
+        jaccard_dist = 1.0 - jaccard_sim
+        
+        # 2. Clustering comparison using leaf assignments
+        # Create cluster assignments for each leaf
+        gold_assignments = create_leaf_cluster_assignments(gold_structure)
+        pred_assignments = create_leaf_cluster_assignments(pred_structure)
+        
+        # Calculate clustering similarity
+        if len(gold_assignments) > 0 and len(pred_assignments) > 0:
+            # Use Adjusted Rand Index as a proxy for clustering similarity
+            cluster_distance = calculate_cluster_distance(gold_assignments, pred_assignments, all_leaves)
+        else:
+            cluster_distance = 1.0
+        
+        # 3. Path distance approximation
+        # Compare pairwise relationships
+        path_distance = calculate_path_distance_approx(gold_structure, pred_structure, all_leaves)
         
         results = {
-            'JRF_k1': symmetric_diff,  # Simplified RF distance
-            'JRF_k2': symmetric_diff * 1.1,  # Approximation
-            'MatchingSplit': symmetric_diff,
-            'PhylogeneticInfo': symmetric_diff,
-            'ClusteringInfo': 1.0 - jaccard,  # Jaccard distance
-            'PathDistance': symmetric_diff
+            'JRF_k1': rf_distance,
+            'JRF_k2': rf_distance * 1.1,  # Approximation for k=2
+            'MatchingSplit': rf_distance,
+            'PhylogeneticInfo': cluster_distance * n_leaves,
+            'ClusteringInfo': jaccard_dist,
+            'PathDistance': path_distance
         }
         
+        print(f"Computed distances: {results}")
         print("Note: These are simplified distance approximations.")
         print("For accurate results, please install R with TreeDist package.")
         
     except Exception as e:
         print(f"Error in Python fallback: {e}")
+        import traceback
+        traceback.print_exc()
         results = {
             'JRF_k1': np.nan,
             'JRF_k2': np.nan,
@@ -568,6 +614,167 @@ def compute_tree_distances_python_fallback(gold_newick: str, pred_newick: str) -
         }
     
     return results
+
+def parse_tree_structure(newick: str) -> Dict:
+    """Parse Newick string to extract tree structure"""
+    # Remove semicolon and whitespace
+    newick = newick.replace(';', '').strip()
+    
+    # Extract all leaves and clusters
+    leaves = []
+    clusters = []
+    
+    # Simple parsing: find all parentheses groups and individual items
+    import re
+    
+    # Find all leaf names (items not in parentheses or at the end of parentheses)
+    leaf_pattern = r'([a-zA-Z_][a-zA-Z0-9_]*)'
+    all_items = re.findall(leaf_pattern, newick)
+    leaves = list(set(all_items))  # Remove duplicates
+    
+    # Find clusters (parentheses groups)
+    cluster_pattern = r'\(([^()]+)\)'
+    cluster_matches = re.findall(cluster_pattern, newick)
+    
+    for cluster_str in cluster_matches:
+        cluster_items = re.findall(leaf_pattern, cluster_str)
+        if len(cluster_items) > 1:
+            clusters.append(cluster_items)
+    
+    return {
+        'leaves': leaves,
+        'clusters': clusters,
+        'raw_newick': newick
+    }
+
+def get_tree_splits(tree_structure: Dict) -> List[List[str]]:
+    """Get all splits (bipartitions) from tree structure"""
+    splits = []
+    all_leaves = set(tree_structure['leaves'])
+    
+    for cluster in tree_structure['clusters']:
+        cluster_set = set(cluster)
+        if len(cluster_set) > 1 and len(cluster_set) < len(all_leaves):
+            splits.append(list(cluster_set))
+            # Also add the complement
+            complement = list(all_leaves - cluster_set)
+            if len(complement) > 1:
+                splits.append(complement)
+    
+    return splits
+
+def create_leaf_cluster_assignments(tree_structure: Dict) -> Dict[str, int]:
+    """Create cluster assignments for each leaf"""
+    assignments = {}
+    
+    # Assign cluster IDs based on which clusters each leaf belongs to
+    for i, cluster in enumerate(tree_structure['clusters']):
+        for leaf in cluster:
+            if leaf not in assignments:
+                assignments[leaf] = []
+            assignments[leaf].append(i)
+    
+    # Convert to single cluster ID (use smallest cluster for each leaf)
+    final_assignments = {}
+    for leaf, cluster_ids in assignments.items():
+        if cluster_ids:
+            final_assignments[leaf] = min(cluster_ids)
+        else:
+            # Singleton cluster
+            final_assignments[leaf] = -1
+    
+    return final_assignments
+
+def calculate_cluster_distance(gold_assignments: Dict, pred_assignments: Dict, all_leaves: set) -> float:
+    """Calculate clustering distance between two cluster assignments"""
+    if not all_leaves:
+        return 0.0
+    
+    # Count agreement and disagreement
+    agreements = 0
+    total_pairs = 0
+    
+    leaves_list = list(all_leaves)
+    n = len(leaves_list)
+    
+    for i in range(n):
+        for j in range(i + 1, n):
+            leaf1, leaf2 = leaves_list[i], leaves_list[j]
+            
+            # Check if both leaves are in the same cluster in both trees
+            gold_same = (leaf1 in gold_assignments and leaf2 in gold_assignments and 
+                        gold_assignments[leaf1] == gold_assignments[leaf2])
+            pred_same = (leaf1 in pred_assignments and leaf2 in pred_assignments and 
+                        pred_assignments[leaf1] == pred_assignments[leaf2])
+            
+            if gold_same == pred_same:
+                agreements += 1
+            
+            total_pairs += 1
+    
+    if total_pairs == 0:
+        return 0.0
+    
+    disagreement_rate = 1.0 - (agreements / total_pairs)
+    return disagreement_rate
+
+def calculate_path_distance_approx(gold_structure: Dict, pred_structure: Dict, all_leaves: set) -> float:
+    """Approximate path distance calculation"""
+    if len(all_leaves) < 2:
+        return 0.0
+    
+    # Create simplified distance matrices
+    gold_distances = create_distance_matrix(gold_structure, all_leaves)
+    pred_distances = create_distance_matrix(pred_structure, all_leaves)
+    
+    # Calculate Frobenius norm of difference
+    total_diff = 0.0
+    n_pairs = 0
+    
+    for leaf1 in all_leaves:
+        for leaf2 in all_leaves:
+            if leaf1 != leaf2:
+                gold_dist = gold_distances.get((leaf1, leaf2), 1.0)
+                pred_dist = pred_distances.get((leaf1, leaf2), 1.0)
+                total_diff += (gold_dist - pred_dist) ** 2
+                n_pairs += 1
+    
+    if n_pairs == 0:
+        return 0.0
+    
+    return (total_diff / n_pairs) ** 0.5
+
+def create_distance_matrix(tree_structure: Dict, all_leaves: set) -> Dict:
+    """Create a simplified distance matrix based on cluster membership"""
+    distances = {}
+    
+    # Create cluster membership matrix
+    leaf_clusters = {}
+    for leaf in all_leaves:
+        leaf_clusters[leaf] = set()
+    
+    for i, cluster in enumerate(tree_structure['clusters']):
+        for leaf in cluster:
+            if leaf in leaf_clusters:
+                leaf_clusters[leaf].add(i)
+    
+    # Calculate distances based on shared cluster membership
+    for leaf1 in all_leaves:
+        for leaf2 in all_leaves:
+            if leaf1 == leaf2:
+                distances[(leaf1, leaf2)] = 0.0
+            else:
+                # Distance based on number of shared clusters
+                shared_clusters = len(leaf_clusters[leaf1] & leaf_clusters[leaf2])
+                total_clusters = len(leaf_clusters[leaf1] | leaf_clusters[leaf2])
+                
+                if total_clusters == 0:
+                    distances[(leaf1, leaf2)] = 1.0
+                else:
+                    # Higher shared clusters = lower distance
+                    distances[(leaf1, leaf2)] = 1.0 - (shared_clusters / total_clusters)
+    
+    return distances
 
 def extract_leaves_from_newick(newick: str) -> List[str]:
     """Extract leaf names from Newick format string"""

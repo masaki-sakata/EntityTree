@@ -8,7 +8,7 @@ from ordered_set import OrderedSet
 
 class HierarchyNode:
 
-    def __init__(self, elements, metric='cosine', use_distances=False):
+    def __init__(self, elements, metric='euclidean', use_distances=False):
         if use_distances:
             self.distance_matrix = elements
         else:

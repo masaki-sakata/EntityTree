@@ -1,10 +1,11 @@
 # embeddings.py
 """
-Sentence-embedding utility supporting three back‑ends and multi‑layer output:
+Sentence-embedding utility supporting four back‑ends and multi‑layer output:
 
 * **FastText**  – average pooling only
 * **GPT‑2**      – choose any hidden layer or **"all"** for every layer
 * **meta‑llama/Meta‑Llama‑3‑8B** – same as GPT‑2
+* **random_emb** – random Gaussian embeddings for baseline comparison
 
 依存:
     pip install torch transformers accelerate fasttext numpy
@@ -23,7 +24,7 @@ import fasttext
 # 型エイリアス
 # -------------------------------------------------------------------------
 _METHOD = Literal["last_token", "average"]
-_MODEL = Literal["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext"]
+_MODEL = Literal["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext", "random_emb"]
 
 
 # -------------------------------------------------------------------------
@@ -48,9 +49,14 @@ class EmbeddingConfig:
         "/work03/masaki/model/fastText_vec/wiki-news-300d-1M-subword.bin"
     )
 
+    # Random embedding 用パラメータ
+    random_dim: int = 768
+    random_std: float = 1.0
+    random_seed: int = 42
+
     def __post_init__(self) -> None:  # noqa: D401
-        """FastText は平均固定に強制。"""
-        if self.model_type == "fasttext":
+        """FastText は平均。"""
+        if self.model_type in ["fasttext"]:
             object.__setattr__(self, "method", "average")
 
 
@@ -68,6 +74,11 @@ class EmbeddingModel:
             path = cfg.model_name or cfg.fasttext_path
             self._ft_model = fasttext.load_model(path)
             self._dim = self._ft_model.get_dimension()
+            return
+
+        # ---------------- Random Embeddings --------
+        if cfg.model_type == "random_emb":
+            self._dim = cfg.random_dim
             return
 
         # ---------------- Transformer 系 -----------------
@@ -108,6 +119,9 @@ class EmbeddingModel:
         if self.cfg.model_type == "fasttext":
             return np.stack([self._encode_fasttext(s) for s in sentences])
 
+        if self.cfg.model_type == "random_emb":
+            return self._encode_random(sentences)
+
         return self._encode_transformer(sentences)
 
     @property
@@ -123,6 +137,8 @@ class EmbeddingModel:
         """利用可能な Transformer 隠れ層数"""
         if self.cfg.model_type == "fasttext":
             return 1
+        if self.cfg.model_type == "random_emb":
+            return 1  # Random embeddings are single layer
         return self._model.config.num_hidden_layers
 
     # -----------------------------------------------------------------
@@ -134,6 +150,31 @@ class EmbeddingModel:
             return np.zeros(self._dim, dtype=np.float32)
         vecs = [self._ft_model.get_word_vector(w) for w in words]
         return np.mean(vecs, axis=0).astype(np.float32)
+
+    # -----------------------------------------------------------------
+    # 内部実装 (Random Embeddings)
+    # -----------------------------------------------------------------
+    def _encode_random(self, sentences: List[str]) -> np.ndarray:
+        """Generate random embeddings for sentences with specified parameters."""
+        # Set seed for reproducibility
+        torch.manual_seed(self.cfg.random_seed)
+        np.random.seed(self.cfg.random_seed)
+        
+        num_sentences = len(sentences)
+        
+        # Generate random embeddings (single layer only)
+        embeddings = torch.randn(num_sentences, self.cfg.random_dim) * self.cfg.random_std
+        
+        # Move to specified device if needed
+        if self.cfg.device.startswith('cuda') and torch.cuda.is_available():
+            embeddings = embeddings.cuda()
+        
+        print(f"Generated random embeddings: shape={embeddings.shape}, "
+              f"std={self.cfg.random_std}, seed={self.cfg.random_seed}")
+        print(f"Actual mean: {embeddings.mean().item():.4f}, "
+              f"actual std: {embeddings.std().item():.4f}")
+        
+        return embeddings.cpu().numpy()
 
     # -----------------------------------------------------------------
     # 内部実装 (Transformer)

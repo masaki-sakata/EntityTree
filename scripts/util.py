@@ -7,7 +7,6 @@ from nltk.tokenize.punkt import PunktSentenceTokenizer, PunktParameters, PunktTr
 import nltk.data
 from nltk.tokenize import sent_tokenize
 from sklearn.metrics import pairwise_distances
-import tensorflow_datasets as tfds
 from itertools import combinations
 
 
@@ -17,40 +16,6 @@ trainer = PunktTrainer()
 # nltk.download('punkt_tab')
 # nltk.download('stopwords')
 tokenizer = nltk.data.load('tokenizers/punkt/english.pickle')
-
-
-def load_cnn_daily_mail_test():
-    cnn = tfds.summarization.CnnDailymail()
-    cnn.download_and_prepare()
-    cnn_dataset = cnn.as_dataset()
-
-    test = cnn_dataset['test']
-    test_np = tfds.as_numpy(test)
-
-    cnn_test = []
-    for item in test_np:
-        temp = {}
-        temp['text'] = item['article'].decode('utf8')
-        temp['summary'] = item['highlights'].decode('utf8')
-        cnn_test.append(temp)
-    return cnn_test
-
-
-def load_cnn_daily_mail_validation():
-    cnn = tfds.summarization.CnnDailymail()
-    cnn.download_and_prepare()
-    cnn_dataset = cnn.as_dataset()
-
-    validation = cnn_dataset['validation']
-    validation_np = tfds.as_numpy(validation)
-
-    cnn_validation = []
-    for item in validation_np:
-        temp = {}
-        temp['text'] = item['article'].decode('utf8')
-        temp['summary'] = item['highlights'].decode('utf8')
-        cnn_validation.append(temp)
-    return cnn_validation
 
 
 def get_file_names(dir):

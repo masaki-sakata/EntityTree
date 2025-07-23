@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # =============================================================================
-# visualize_tree.py (Improved Version)
+# visualize_tree.py (Improved Version with Random Embeddings)
 # =============================================================================
 """
 Build Tree HTML visualizations with profession-based coloring and PNG export.
@@ -10,6 +10,7 @@ New features:
 - Color entities by profession (parent node category)
 - Export to PNG format in addition to HTML
 - Larger font sizes
+- Support for random embeddings generation
 """
 from __future__ import annotations
 
@@ -62,7 +63,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Embedding params --------------------------------------------------------
     p.add_argument(
         "--model",
-        choices=["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext"],
+        choices=["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext", "random_emb"],
         default="gpt2",
     )
     p.add_argument("--method", choices=["average", "last_token"], default="last_token")
@@ -72,6 +73,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help='Transformer hidden layer index (0-based). Use "all" for every layer.',
     )
     p.add_argument("--device", default="cuda")
+
+    # Random embedding specific params ----------------------------------------
+    p.add_argument("--random_dim", type=int, default=768, 
+                   help="Dimension for random embeddings (only used with model=random_emb)")
+    p.add_argument("--random_std", type=float, default=1.0,
+                   help="Standard deviation for random embeddings (only used with model=random_emb)")
+    p.add_argument("--random_seed", type=int, default=42,
+                   help="Random seed for reproducible embeddings (only used with model=random_emb)")
+
 
     return p
 
@@ -167,8 +177,32 @@ def _encode_sentences(
     method: str,
     layer: str | int,
     device: str,
+    # Random embedding parameters
+    random_dim: int = 768,
+    random_std: float = 1.0,
+    random_seed: int = 42,
 ) -> tuple[np.ndarray, Sequence[int]]:
     """Embed sentences and return (embeddings, target_layers)."""
+    
+    # Handle random embeddings through EmbeddingModel
+    if model_type == "random_emb":
+        cfg = EmbeddingConfig(
+            model_type=model_type,
+            method=method,
+            layer=0,  # Random embeddings are always single layer (layer 0)
+            device=device,
+            random_dim=random_dim,
+            random_std=random_std,
+            random_seed=random_seed,
+        )
+        embedder = EmbeddingModel(cfg)
+        embs = embedder.encode(list(sentences))  # shape: (N, D)
+        embs = embs[None]  # → (1, N, D)
+        target_layers = [0]
+        
+        return embs, target_layers
+    
+    # Handle other model types (existing code)
     cfg = EmbeddingConfig(
         model_type=model_type,
         method=method,
@@ -227,6 +261,9 @@ def run(args) -> None:
         method=args.method,
         layer=args.layer,
         device=args.device,
+        random_dim=args.random_dim,
+        random_std=args.random_std,
+        random_seed=args.random_seed,
     )
 
     base_out = Path(args.output_dir)
@@ -251,7 +288,11 @@ def run(args) -> None:
         highlights = None  # set(trimming_summary) | set(kcenter_summary) | set(important)
 
         # Create title with model and layer info
-        model_display = args.model.split("/")[-1] if "/" in args.model else args.model
+        if args.model == "random_emb":
+            model_display = f"Random Emb (dim={args.random_dim}, std={args.random_std}, seed={args.random_seed})"
+        else:
+            model_display = args.model.split("/")[-1] if "/" in args.model else args.model
+        
         title = f"{model_display} - Layer {l_idx} - Hierarchical Clustering"
 
         # Encode tree to HTML with enhanced options
@@ -293,6 +334,14 @@ if __name__ == "__main__":
         print("Warning: --export_png specified but selenium not available.")
         print("Install with: pip install selenium")
         print("Also ensure you have Chrome/Chromium and chromedriver installed.")
+    
+    # Validate random embedding parameters
+    if args.model == "random_emb":
+        print(f"Using random embeddings with:")
+        print(f"  Dimension: {args.random_dim}")
+        print(f"  Standard deviation: {args.random_std}")
+        print(f"  Random seed: {args.random_seed}")
+        print(f"  Layer: 0 (single layer only)")
     
     print("Arguments:")
     print(json.dumps(vars(args), indent=2, ensure_ascii=False))

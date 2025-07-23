@@ -1,0 +1,1 @@
+uv run python3 build_taxonomy_big_tree.py --max-entities 30 --min-depth 3 --max-depth 5 --output ../../../input/dynamic_taxonomy.jsonl

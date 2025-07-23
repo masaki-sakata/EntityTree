@@ -1,16 +1,14 @@
 #!/usr/bin/env python
 # =============================================================================
-# visualize_tree.py (Improved Version with Random Embeddings)
+# visualize_tree.py (Template-enabled Version)
 # =============================================================================
 """
-Build Tree HTML visualizations with profession-based coloring and PNG export.
+Build Tree HTML visualizations with template-based text generation.
 
 New features:
-- Display model name and layer number on HTML
-- Color entities by profession (parent node category)
-- Export to PNG format in addition to HTML
-- Larger font sizes
-- Support for random embeddings generation
+- Template system for generating contextual text from entity names
+- Support for various question formats and professional contexts
+- Maintains profession-based coloring and PNG export capabilities
 """
 from __future__ import annotations
 
@@ -27,6 +25,7 @@ from embeddings import EmbeddingConfig, EmbeddingModel
 from hierarchy_node import HierarchyNode
 from html_tree_encoding import HTMLTreeEncoding as TreeEncoding
 import summarization
+import template  # Import our new template module
 
 # Optional dependencies for PNG export
 try:
@@ -54,11 +53,17 @@ PROFESSION_COLORS = {
 # --------------------------------------------------------------------------- #
 
 def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Build Tree and export HTML/PNG")
+    p = argparse.ArgumentParser(description="Build Tree and export HTML/PNG with templates")
     p.add_argument("--input", required=True, help="Input JSONL file")
     p.add_argument("--output_dir", required=True, help="Output directory for HTML/PNG files")
     p.add_argument("--output_file_name", required=True, help="Output file name (without extension)")
     p.add_argument("--export_png", action="store_true", help="Export PNG files (requires selenium)")
+
+    # Template params ----------------------------------------------------------
+    p.add_argument("--template", type=str, default="entity_only",
+                   help=f"Template to use for text generation. Available: {', '.join(template.list_templates())}")
+    p.add_argument("--list_templates", action="store_true",
+                   help="List all available templates and exit")
 
     # Embedding params --------------------------------------------------------
     p.add_argument(
@@ -81,7 +86,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Standard deviation for random embeddings (only used with model=random_emb)")
     p.add_argument("--random_seed", type=int, default=42,
                    help="Random seed for reproducible embeddings (only used with model=random_emb)")
-
 
     return p
 
@@ -120,13 +124,25 @@ def extract_profession_mapping(df: pd.DataFrame) -> Dict[str, str]:
     return profession_map
 
 
-def get_node_colors(sentences: list[str], profession_map: Dict[str, str]) -> Dict[int, str]:
+def get_node_colors(entity_names: list[str], profession_map: Dict[str, str]) -> Dict[int, str]:
     """Map node indices to colors based on profession."""
     colors = {}
-    for idx, sentence in enumerate(sentences):
-        profession = profession_map.get(sentence, "Person")
+    for idx, entity_name in enumerate(entity_names):
+        profession = profession_map.get(entity_name, "Person")
         colors[idx] = PROFESSION_COLORS.get(profession, "#CCCCCC")  # Default gray
     return colors
+
+
+def apply_template_to_entities(entity_names: list[str], template_name: str) -> tuple[list[str], str]:
+    """Apply template to all entity names and return templated texts."""
+    template_str = template.get_template(template_name)
+    templated_texts = []
+    
+    for entity_name in entity_names:
+        templated_text = template.apply_template(template_str, entity_name)
+        templated_texts.append(templated_text)
+    
+    return templated_texts, template_str
 
 
 def export_to_png(html_path: Path, png_path: Path) -> bool:
@@ -235,6 +251,13 @@ def _encode_sentences(
 # --------------------------------------------------------------------------- #
 
 def run(args) -> None:
+    # Handle list templates request
+    if args.list_templates:
+        print("Available templates:")
+        print("=" * 50)
+        template.show_template_examples()
+        return
+
     # 1) Load & preprocess ----------------------------------------------------
     input_path = Path(args.input)
     
@@ -244,19 +267,24 @@ def run(args) -> None:
     # Extract profession mapping for all entities and categories
     profession_map = extract_profession_mapping(df)
     
-    # Filter entity rows and extract sentences
+    # Filter entity rows and extract entity names
     entity_df = df[df["is_entity"] == True]
-    sentences = entity_df["wiki_title"].fillna("").tolist()
+    entity_names = entity_df["wiki_title"].fillna("").tolist()
     
-    # Get color mapping for nodes
-    node_colors = get_node_colors(sentences, profession_map)
+    # Apply template to entity names to create actual input texts
+    templated_texts, template_str = apply_template_to_entities(entity_names, args.template)
+    
+    # Get color mapping for nodes (based on original entity names)
+    node_colors = get_node_colors(entity_names, profession_map)
 
-    print(f"Loaded {len(sentences)} entities from {len(df)} total records")
-    print(f"Profession distribution: {pd.Series([profession_map.get(s, 'Unknown') for s in sentences]).value_counts().to_dict()}")
+    print(f"Loaded {len(entity_names)} entities from {len(df)} total records")
+    print(f"Template used: '{args.template}' -> '{template_str}'")
+    print(f"Example templated text: '{templated_texts[0] if templated_texts else 'N/A'}'")
+    print(f"Profession distribution: {pd.Series([profession_map.get(s, 'Unknown') for s in entity_names]).value_counts().to_dict()}")
 
-    # 2) Embed sentences (single forward pass when possible) -----------------
+    # 2) Embed templated sentences (single forward pass when possible) -------
     all_embs, target_layers = _encode_sentences(
-        sentences=sentences,
+        sentences=templated_texts,  # Use templated texts instead of entity names
         model_type=args.model,
         method=args.method,
         layer=args.layer,
@@ -287,22 +315,23 @@ def run(args) -> None:
         )
         highlights = None  # set(trimming_summary) | set(kcenter_summary) | set(important)
 
-        # Create title with model and layer info
+        # Create title with model, layer, and template info
         if args.model == "random_emb":
             model_display = f"Random Emb (dim={args.random_dim}, std={args.random_std}, seed={args.random_seed})"
         else:
             model_display = args.model.split("/")[-1] if "/" in args.model else args.model
         
-        title = f"{model_display} - Layer {l_idx} - Hierarchical Clustering"
+        title = f"{model_display} - Layer {l_idx} - Template: {args.template}"
 
         # Encode tree to HTML with enhanced options
+        # Use original entity names for labels, but embeddings come from templated texts
         tree_encoder = TreeEncoding(
             adjacency=adjacency,
             births=hierarchy.birth_time,
             n_leaves=n_leaves,
             n_nodes=n_nodes,
             highlights=highlights,
-            labels={idx: sent for idx, sent in enumerate(sentences)},
+            labels={idx: entity_name for idx, entity_name in enumerate(entity_names)},  # Show original entity names
             node_colors=node_colors,
             title=title,
             height_px=1000,

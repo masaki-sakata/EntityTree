@@ -13,7 +13,7 @@ Sentence-embedding utility supporting four back‑ends and multi‑layer output:
 Template Support:
     This module now works seamlessly with template-generated text.
     For template text like "What is the occupation of [entity]?", the embedding
-    extraction will focus on the last token or use average pooling as specified.
+    extraction will focus on the entity name tokens only.
 """
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ import fasttext
 # -------------------------------------------------------------------------
 # 型エイリアス
 # -------------------------------------------------------------------------
-_METHOD = Literal["last_token", "average", "entity_last_token"]
+_METHOD = Literal["last_token", "average"]
 _MODEL = Literal["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext", "random_emb"]
 
 
@@ -44,9 +44,8 @@ class EmbeddingConfig:
     埋め込みを返します。
     
     Template Support:
-    - method="last_token": 文全体の最後のトークン
-    - method="average": 文全体の平均
-    - method="entity_last_token": エンティティ名の最後のトークンのみ（テンプレート対応）
+    - method="last_token": エンティティ名の最後のトークン
+    - method="average": エンティティ名のトークンの平均
     """
 
     model_type: _MODEL = "gpt2"
@@ -54,6 +53,7 @@ class EmbeddingConfig:
     method: _METHOD = "average"
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     model_name: Optional[str] = None  # HuggingFace リポ ID または FastText パス
+    verbose: bool = False  # デバッグ用：使用トークンを出力
 
     # FastText 用デフォルト
     fasttext_path: str = (
@@ -66,11 +66,8 @@ class EmbeddingConfig:
     random_seed: int = 42
 
     def __post_init__(self) -> None:  # noqa: D401
-        """FastText は平均のみ。entity_last_tokenは他のモデルでのみサポート。"""
+        """FastText は平均のみ。"""
         if self.model_type in ["fasttext"]:
-            object.__setattr__(self, "method", "average")
-        elif self.model_type == "random_emb" and self.method == "entity_last_token":
-            # Random embeddingsではentity_last_tokenをaverage に変更
             object.__setattr__(self, "method", "average")
 
 
@@ -159,9 +156,21 @@ class EmbeddingModel:
     # 内部実装 (FastText)
     # -----------------------------------------------------------------
     def _encode_fasttext(self, sentence: str) -> np.ndarray:
-        words = sentence.split()
+        # FastTextの場合、エンティティ名を抽出してその単語の平均を取る
+        entity_name = self._extract_entity_name_from_template(sentence)
+        if not entity_name:
+            raise ValueError(f"FastText: Entity not found in template sentence: '{sentence}'")
+        
+        words = entity_name.split()
+        
+        if self.cfg.verbose:
+            print(f"[FastText Debug] Sentence: '{sentence}'")
+            print(f"[FastText Debug] Entity: '{entity_name}'")
+            print(f"[FastText Debug] Words used: {words[:5]}")  # 最初の5個
+        
         if not words:
-            return np.zeros(self._dim, dtype=np.float32)
+            raise ValueError(f"FastText: No words found in entity name: '{entity_name}'")
+        
         vecs = [self._ft_model.get_word_vector(w) for w in words]
         return np.mean(vecs, axis=0).astype(np.float32)
 
@@ -175,6 +184,16 @@ class EmbeddingModel:
         np.random.seed(self.cfg.random_seed)
         
         num_sentences = len(sentences)
+        
+        # Verbose debug for random embeddings
+        if self.cfg.verbose:
+            print(f"[Random Embeddings Debug] Processing {num_sentences} sentences")
+            for i, sentence in enumerate(sentences[:5]):  # Show first 5
+                entity_name = self._extract_entity_name_from_template(sentence)
+                print(f"[Random Debug {i+1}] Sentence: '{sentence}'")
+                print(f"[Random Debug {i+1}] Entity: '{entity_name}'")
+                print(f"[Random Debug {i+1}] Note: Random embeddings don't use actual tokens")
+                print("-" * 50)
         
         # Generate random embeddings (single layer only)
         embeddings = torch.randn(num_sentences, self.cfg.random_dim) * self.cfg.random_std
@@ -191,7 +210,7 @@ class EmbeddingModel:
         return embeddings.cpu().numpy()
 
     # -----------------------------------------------------------------
-    # 内部実装 (Transformer) - Template Support Added
+    # 内部実装 (Transformer) - Entity-focused Methods
     # -----------------------------------------------------------------
     def _encode_transformer(self, sentences: List[str]) -> np.ndarray:
         toks = self._tokenizer(
@@ -207,19 +226,83 @@ class EmbeddingModel:
 
         # ---------------- 内部ヘルパ ----------------
         def _pool(hidden):
-            if self.cfg.method == "average":
-                summed = (hidden * mask.unsqueeze(-1)).sum(dim=1)
-                counts = mask.sum(dim=1, keepdim=True).clamp(min=1)
-                emb = summed / counts
-            elif self.cfg.method == "last_token":
-                idx = mask.sum(dim=1) - 1
-                emb = hidden[torch.arange(hidden.size(0)), idx]
-            elif self.cfg.method == "entity_last_token":
-                # テンプレート内のエンティティ名の最後のトークンを抽出
-                emb = self._extract_entity_embeddings(hidden, mask, sentences)
-            else:
-                raise ValueError(f"Unknown method: {self.cfg.method}")
-            return emb.cpu().float().numpy()
+            batch_size = hidden.size(0)
+            embeddings = []
+            
+            for i in range(batch_size):
+                sentence = sentences[i]
+                entity_name = self._extract_entity_name_from_template(sentence)
+                
+                if not entity_name:
+                    raise ValueError(f"Transformer: Entity not found in template sentence: '{sentence}'")
+                
+                # エンティティ名のトークン範囲を特定
+                entity_start_idx, entity_end_idx = self._find_entity_token_range(
+                    sentence, entity_name, i
+                )
+                
+                if entity_start_idx is None or entity_end_idx is None:
+                    if self.cfg.verbose and i < 5:
+                        entity_tokens = self._tokenizer.tokenize(entity_name)
+                        sentence_tokens = self._tokenizer.tokenize(sentence)
+                        print(f"[Debug {i+1}] ERROR: Entity tokens not found!")
+                        print(f"[Debug {i+1}] Sentence: '{sentence}'")
+                        print(f"[Debug {i+1}] Entity: '{entity_name}'")
+                        print(f"[Debug {i+1}] Entity tokens: {entity_tokens}")
+                        print(f"[Debug {i+1}] Sentence tokens: {sentence_tokens}")
+                        print("-" * 50)
+                    raise ValueError(f"Transformer: Entity tokens '{entity_name}' not found in sentence tokens for: '{sentence}'")
+                
+                # エンティティ名のトークン範囲内で処理
+                entity_mask = mask[i, entity_start_idx:entity_end_idx+1]
+                entity_hidden = hidden[i, entity_start_idx:entity_end_idx+1]
+                
+                # デバッグ出力
+                if self.cfg.verbose and i < 5:  # 最初の5個のみ出力
+                    entity_tokens = self._tokenizer.tokenize(entity_name)
+                    sentence_tokens = self._tokenizer.tokenize(sentence)
+                    
+                    # 実際に使用されるトークンIDを取得して表示
+                    full_tokenized = self._tokenizer(sentence, return_tensors="pt")
+                    token_ids = full_tokenized.input_ids[0]
+                    all_tokens_with_ids = [(self._tokenizer.decode([tid]), tid.item()) for tid in token_ids]
+                    entity_tokens_with_ids = all_tokens_with_ids[entity_start_idx:entity_end_idx+1]
+                    
+                    print(f"[Debug {i+1}] Sentence: '{sentence}'")
+                    print(f"[Debug {i+1}] Entity: '{entity_name}'")
+                    print(f"[Debug {i+1}] Entity tokens: {entity_tokens}")
+                    print(f"[Debug {i+1}] All sentence tokens: {sentence_tokens}")
+                    print(f"[Debug {i+1}] Token range: {entity_start_idx}-{entity_end_idx}")
+                    print(f"[Debug {i+1}] Actually used tokens+IDs: {entity_tokens_with_ids}")
+                    print(f"[Debug {i+1}] Method: {self.cfg.method}")
+                    print(f"[Debug {i+1}] IMPORTANT: Using CONTEXTUALIZED embeddings!")
+                    print(f"[Debug {i+1}] -> The model processes the ENTIRE sentence first")
+                    print(f"[Debug {i+1}] -> Then extracts embeddings from entity token range")
+                    if entity_tokens:
+                        context_tokens = sentence_tokens[:max(0, entity_start_idx)]
+                        print(f"[Debug {i+1}] -> '{entity_tokens[-1]}' is contextualized by: {context_tokens}")
+                    print("-" * 50)
+                
+                if self.cfg.method == "average":
+                    # エンティティ名トークンの平均
+                    if entity_mask.sum() > 0:
+                        summed = (entity_hidden * entity_mask.unsqueeze(-1)).sum(dim=0)
+                        count = entity_mask.sum().clamp(min=1)
+                        emb = summed / count
+                    else:
+                        emb = entity_hidden.mean(dim=0)
+                else:  # last_token
+                    # エンティティ名の最後のトークン
+                    if entity_mask.sum() > 0:
+                        valid_indices = entity_mask.nonzero(as_tuple=True)[0]
+                        last_valid_idx = valid_indices[-1]
+                        emb = entity_hidden[last_valid_idx]
+                    else:
+                        emb = entity_hidden[-1]
+                
+                embeddings.append(emb)
+            
+            return torch.stack(embeddings).cpu().float().numpy()
 
         # 全層まとめて
         if self.cfg.layer == "all":
@@ -230,35 +313,6 @@ class EmbeddingModel:
         hidden = hiddens[self.cfg.layer]
         return _pool(hidden)
 
-    def _extract_entity_embeddings(self, hidden, mask, sentences):
-        """テンプレート文からエンティティ名の最後のトークンの埋め込みを抽出"""
-        batch_size = hidden.size(0)
-        embeddings = []
-        
-        for i in range(batch_size):
-            sentence = sentences[i]
-            
-            # エンティティ名を抽出（簡単な正規表現ベース）
-            entity_name = self._extract_entity_name_from_template(sentence)
-            
-            if entity_name:
-                # エンティティ名の最後のトークンの位置を特定
-                entity_last_token_idx = self._find_entity_last_token_position(
-                    sentence, entity_name, i
-                )
-                if entity_last_token_idx is not None and entity_last_token_idx < mask[i].sum():
-                    embeddings.append(hidden[i, entity_last_token_idx])
-                else:
-                    # フォールバック: 文全体の最後のトークン
-                    last_idx = mask[i].sum() - 1
-                    embeddings.append(hidden[i, last_idx])
-            else:
-                # エンティティが見つからない場合は最後のトークンを使用
-                last_idx = mask[i].sum() - 1
-                embeddings.append(hidden[i, last_idx])
-        
-        return torch.stack(embeddings)
-
     def _extract_entity_name_from_template(self, template_text: str) -> Optional[str]:
         """テンプレート文からエンティティ名を抽出
         
@@ -268,12 +322,14 @@ class EmbeddingModel:
         - "Who is Marie Curie?" -> "Marie Curie"
         """
         
-        # よくあるテンプレートパターンを定義
+        # よくあるテンプレートパターンを定義（順序重要：より具体的なものを先に）
         patterns = [
             # "What is the occupation of [entity]?"
-            r"What is the occupation of (.+?)\?",
+            r"What is the occupation of (.+?)",
+            # "What would be a good gift for [entity]?"
+            r"What would be a good gift for (.+?)",
             # "Who is [entity]?"
-            r"Who is (.+?)\?",
+            r"Who is (.+?)",
             # "Tell me about [entity]."
             r"Tell me about (.+?)\.",
             # "Describe [entity]."
@@ -282,31 +338,51 @@ class EmbeddingModel:
             r"^(.+?) is a person who",
             # "Classify [entity] by profession:"
             r"Classify (.+?) by profession:",
+            # "The profession of [entity] is"
+            r"The profession of (.+?) is",
+            # "[entity]'s occupation"
+            r"^(.+?)'s occupation",
             # その他のパターンを必要に応じて追加
         ]
         
         for pattern in patterns:
             match = re.search(pattern, template_text, re.IGNORECASE)
             if match:
-                return match.group(1).strip()
+                entity = match.group(1).strip()
+                if self.cfg.verbose:
+                    print(f"[Entity Extraction] Pattern matched: '{pattern}' -> '{entity}'")
+                return entity
         
         # パターンが見つからない場合、文全体がエンティティ名の可能性
         # （"Barack Obama"のような単純なケース）
         if len(template_text.split()) <= 4 and not template_text.endswith(('?', '.', '!')):
+            if self.cfg.verbose:
+                print(f"[Entity Extraction] Using whole text as entity: '{template_text}'")
             return template_text.strip()
+        
+        # デバッグ情報を出力
+        if self.cfg.verbose:
+            print(f"[Entity Extraction] WARNING: No pattern matched for: '{template_text}'")
+            print(f"[Entity Extraction] Available patterns: {len(patterns)}")
         
         return None
 
-    def _find_entity_last_token_position(self, sentence: str, entity_name: str, batch_idx: int) -> Optional[int]:
-        """エンティティ名の最後のトークンの位置を特定"""
+    def _find_entity_token_range(self, sentence: str, entity_name: str, batch_idx: int) -> tuple[Optional[int], Optional[int]]:
+        """エンティティ名のトークン範囲（開始と終了インデックス）を特定"""
         
         # エンティティ名をトークン化
         entity_tokens = self._tokenizer.tokenize(entity_name)
         if not entity_tokens:
-            return None
+            if self.cfg.verbose:
+                print(f"[Token Range] ERROR: No tokens for entity '{entity_name}'")
+            return None, None
         
         # 文全体をトークン化
         sentence_tokens = self._tokenizer.tokenize(sentence)
+        
+        if self.cfg.verbose and batch_idx < 5:
+            print(f"[Token Range] Entity '{entity_name}' -> tokens: {entity_tokens}")
+            print(f"[Token Range] Sentence tokens: {sentence_tokens}")
         
         # エンティティトークンが文中のどこに現れるかを検索
         entity_start_idx = self._find_token_sequence(sentence_tokens, entity_tokens)
@@ -315,7 +391,57 @@ class EmbeddingModel:
             # +1 for [CLS] token (if present)
             has_special_tokens = self._tokenizer.cls_token is not None
             offset = 1 if has_special_tokens else 0
-            return entity_start_idx + len(entity_tokens) - 1 + offset
+            start_idx = entity_start_idx + offset
+            end_idx = start_idx + len(entity_tokens) - 1
+            
+            if self.cfg.verbose and batch_idx < 5:
+                print(f"[Token Range] Found at sentence position: {entity_start_idx}")
+                print(f"[Token Range] Final range (with offset {offset}): {start_idx}-{end_idx}")
+            
+            return start_idx, end_idx
+        
+        # 完全一致が失敗した場合、部分マッチを試行
+        partial_match = self._find_partial_token_sequence(sentence_tokens, entity_tokens)
+        if partial_match is not None:
+            has_special_tokens = self._tokenizer.cls_token is not None
+            offset = 1 if has_special_tokens else 0
+            start_idx = partial_match[0] + offset
+            end_idx = partial_match[1] + offset
+            
+            if self.cfg.verbose and batch_idx < 5:
+                print(f"[Token Range] Partial match found at: {partial_match}")
+                print(f"[Token Range] Final range (with offset {offset}): {start_idx}-{end_idx}")
+            
+            return start_idx, end_idx
+        
+        if self.cfg.verbose and batch_idx < 5:
+            print(f"[Token Range] ERROR: No match found for entity tokens")
+        
+        return None, None
+
+    def _find_partial_token_sequence(self, haystack: List[str], needle: List[str]) -> Optional[tuple[int, int]]:
+        """部分的なトークンシーケンスマッチを試行"""
+        if not needle:
+            return None
+        
+        # 各トークンを個別に検索して連続する範囲を見つける
+        for i in range(len(haystack)):
+            matched_count = 0
+            for j, token in enumerate(needle):
+                if i + j < len(haystack):
+                    # トークンの部分一致も許可（サブワードトークン対応）
+                    if (token in haystack[i + j] or 
+                        haystack[i + j] in token or
+                        token.lower() == haystack[i + j].lower()):
+                        matched_count += 1
+                    else:
+                        break
+                else:
+                    break
+            
+            # 過半数以上マッチした場合を有効とする
+            if matched_count >= len(needle) * 0.6:  # 60%以上マッチ
+                return (i, i + matched_count - 1)
         
         return None
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # =============================================================================
-# visualize_tree.py (Template-enabled Version)
+# visualize_tree.py (Template-enabled Version with Verbose Debug)
 # =============================================================================
 """
 Build Tree HTML visualizations with template-based text generation.
@@ -9,6 +9,7 @@ New features:
 - Template system for generating contextual text from entity names
 - Support for various question formats and professional contexts
 - Maintains profession-based coloring and PNG export capabilities
+- Verbose mode for debugging token usage
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument("--output_dir", required=True, help="Output directory for HTML/PNG files")
     p.add_argument("--output_file_name", required=True, help="Output file name (without extension)")
     p.add_argument("--export_png", action="store_true", help="Export PNG files (requires selenium)")
+    p.add_argument("--verbose", action="store_true", help="Enable verbose debug output for token inspection")
 
     # Template params ----------------------------------------------------------
     p.add_argument("--template", type=str, default="entity_only",
@@ -193,6 +195,7 @@ def _encode_sentences(
     method: str,
     layer: str | int,
     device: str,
+    verbose: bool = False,
     # Random embedding parameters
     random_dim: int = 768,
     random_std: float = 1.0,
@@ -207,6 +210,7 @@ def _encode_sentences(
             method=method,
             layer=0,  # Random embeddings are always single layer (layer 0)
             device=device,
+            verbose=verbose,
             random_dim=random_dim,
             random_std=random_std,
             random_seed=random_seed,
@@ -224,6 +228,7 @@ def _encode_sentences(
         method=method,
         layer=layer,
         device=device,
+        verbose=verbose,
     )
     embedder = EmbeddingModel(cfg)
     embs = embedder.encode(list(sentences))
@@ -282,6 +287,11 @@ def run(args) -> None:
     print(f"Example templated text: '{templated_texts[0] if templated_texts else 'N/A'}'")
     print(f"Profession distribution: {pd.Series([profession_map.get(s, 'Unknown') for s in entity_names]).value_counts().to_dict()}")
 
+    if args.verbose:
+        print("\n" + "="*60)
+        print("VERBOSE MODE: Debugging token usage...")
+        print("="*60)
+
     # 2) Embed templated sentences (single forward pass when possible) -------
     all_embs, target_layers = _encode_sentences(
         sentences=templated_texts,  # Use templated texts instead of entity names
@@ -289,10 +299,16 @@ def run(args) -> None:
         method=args.method,
         layer=args.layer,
         device=args.device,
+        verbose=args.verbose,
         random_dim=args.random_dim,
         random_std=args.random_std,
         random_seed=args.random_seed,
     )
+
+    if args.verbose:
+        print("="*60)
+        print("Token debugging complete.")
+        print("="*60 + "\n")
 
     base_out = Path(args.output_dir)
 

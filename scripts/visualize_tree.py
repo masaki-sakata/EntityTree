@@ -191,6 +191,7 @@ def export_to_png(html_path: Path, png_path: Path) -> bool:
 
 def _encode_sentences(
     sentences: Sequence[str],
+    entity_names: Sequence[str],  # 必須引数として定義
     model_type: str,
     method: str,
     layer: str | int,
@@ -202,6 +203,9 @@ def _encode_sentences(
     random_seed: int = 42,
 ) -> tuple[np.ndarray, Sequence[int]]:
     """Embed sentences and return (embeddings, target_layers)."""
+    
+    if len(sentences) != len(entity_names):
+        raise ValueError(f"sentences と entity_names の長さが一致しません: {len(sentences)} != {len(entity_names)}")
     
     # Handle random embeddings through EmbeddingModel
     if model_type == "random_emb":
@@ -216,7 +220,7 @@ def _encode_sentences(
             random_seed=random_seed,
         )
         embedder = EmbeddingModel(cfg)
-        embs = embedder.encode(list(sentences))  # shape: (N, D)
+        embs = embedder.encode(list(sentences), list(entity_names))
         embs = embs[None]  # → (1, N, D)
         target_layers = [0]
         
@@ -231,7 +235,7 @@ def _encode_sentences(
         verbose=verbose,
     )
     embedder = EmbeddingModel(cfg)
-    embs = embedder.encode(list(sentences))
+    embs = embedder.encode(list(sentences), list(entity_names))
 
     want_all = isinstance(layer, str) and layer.lower() == "all"
 
@@ -294,7 +298,8 @@ def run(args) -> None:
 
     # 2) Embed templated sentences (single forward pass when possible) -------
     all_embs, target_layers = _encode_sentences(
-        sentences=templated_texts,  # Use templated texts instead of entity names
+        sentences=templated_texts,  
+        entity_names=entity_names,  
         model_type=args.model,
         method=args.method,
         layer=args.layer,

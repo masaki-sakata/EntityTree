@@ -10,73 +10,13 @@ DEVICE=cuda:0
 VERBOSE="--verbose"
 
 
-#####################################
-# # Meta-Llama model
-# MODEL="meta-llama/Meta-Llama-3-8B"
-# METHOD=last_token
-# BASE_OUTPUT_DIR="../output/${MODEL}"
-
-# # echo "Running Meta-Llama-3-8B..."
-# # # Template 1: entity_only
-# # TEMPLATE="entity_only"
-# # OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
-
-# # echo "Template: ${TEMPLATE}"
-# # uv run python3 visualize_tree.py \
-# #     --input ${INPUT} \
-# #     --output_dir ${OUTPUT_DIR} \
-# #     --output_file_name ${OUTPUT_FILE_NAME} \
-# #     --model ${MODEL} \
-# #     --method ${METHOD} \
-# #     --device ${DEVICE} \
-# #     --template ${TEMPLATE} \
-# #     --export_png \
-# #     $VERBOSE
-
-# # Template 2: occupation_question 
-# TEMPLATE="occupation_question"
-# OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
-
-# echo "Template: ${TEMPLATE}"
-# uv run python3 visualize_tree.py \
-#     --input ${INPUT} \
-#     --output_dir ${OUTPUT_DIR} \
-#     --output_file_name ${OUTPUT_FILE_NAME} \
-#     --model ${MODEL} \
-#     --method ${METHOD} \
-#     --device ${DEVICE} \
-#     --template ${TEMPLATE} \
-#     --export_png \
-#     $VERBOSE
-
-# # Template 3: gift
-# TEMPLATE="gift"
-# OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
-
-# echo "Template: ${TEMPLATE}"
-# uv run python3 visualize_tree.py \
-#     --input ${INPUT} \
-#     --output_dir ${OUTPUT_DIR} \
-#     --output_file_name ${OUTPUT_FILE_NAME} \
-#     --model ${MODEL} \
-#     --method ${METHOD} \
-#     --device ${DEVICE} \
-#     --template ${TEMPLATE} \
-#     --export_png \
-#     $VERBOSE
-
-
-
-
-#####################################
-# GPT-2 model
-MODEL="gpt2"
+####################################
+# Meta-Llama model
+MODEL="meta-llama/Meta-Llama-3-8B"
 METHOD=last_token
 BASE_OUTPUT_DIR="../output/${MODEL}"
 
-echo "Testing different templates with ${MODEL}..."
-echo "=============================================="
-
+# echo "Running Meta-Llama-3-8B..."
 # # Template 1: entity_only
 # TEMPLATE="entity_only"
 # OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
@@ -122,6 +62,64 @@ uv run python3 visualize_tree.py \
     --device ${DEVICE} \
     --template ${TEMPLATE} \
     $VERBOSE
+
+
+
+
+#####################################
+# # GPT-2 model
+# MODEL="gpt2"
+# METHOD=last_token
+# BASE_OUTPUT_DIR="../output/${MODEL}"
+
+# echo "Testing different templates with ${MODEL}..."
+# echo "=============================================="
+
+# # Template 1: entity_only
+# TEMPLATE="entity_only"
+# OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
+
+# echo "Template: ${TEMPLATE}"
+# uv run python3 visualize_tree.py \
+#     --input ${INPUT} \
+#     --output_dir ${OUTPUT_DIR} \
+#     --output_file_name ${OUTPUT_FILE_NAME} \
+#     --model ${MODEL} \
+#     --method ${METHOD} \
+#     --device ${DEVICE} \
+#     --template ${TEMPLATE} \
+#     --export_png \
+#     $VERBOSE
+
+# # Template 2: occupation_question 
+# TEMPLATE="occupation_question"
+# OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
+
+# echo "Template: ${TEMPLATE}"
+# uv run python3 visualize_tree.py \
+#     --input ${INPUT} \
+#     --output_dir ${OUTPUT_DIR} \
+#     --output_file_name ${OUTPUT_FILE_NAME} \
+#     --model ${MODEL} \
+#     --method ${METHOD} \
+#     --device ${DEVICE} \
+#     --template ${TEMPLATE} \
+#     $VERBOSE
+
+# # Template 3: gift
+# TEMPLATE="gift"
+# OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
+
+# echo "Template: ${TEMPLATE}"
+# uv run python3 visualize_tree.py \
+#     --input ${INPUT} \
+#     --output_dir ${OUTPUT_DIR} \
+#     --output_file_name ${OUTPUT_FILE_NAME} \
+#     --model ${MODEL} \
+#     --method ${METHOD} \
+#     --device ${DEVICE} \
+#     --template ${TEMPLATE} \
+#     $VERBOSE
 
 
 

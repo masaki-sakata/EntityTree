@@ -165,9 +165,20 @@ class EmbeddingModel:
         words = entity_name.split()
         
         if self.cfg.verbose:
-            print(f"[FastText Debug] Sentence: '{sentence}'")
-            print(f"[FastText Debug] Entity: '{entity_name}'")
-            print(f"[FastText Debug] Words used: {words[:5]}")  # 最初の5個
+            print("\n" + "=" * 60)
+            print(f"[FastText Debug] Processing sentence #{getattr(self, '_debug_counter', 0) + 1}")
+            print("=" * 60)
+            print(f"Sentence: '{sentence}'")
+            print(f"Entity:   '{entity_name}'")
+            print(f"Words used for embedding: {words[:5]}")
+            if len(words) > 5:
+                print(f"... and {len(words) - 5} more words")
+            print("=" * 60 + "\n")
+            
+            # カウンター更新
+            if not hasattr(self, '_debug_counter'):
+                self._debug_counter = 0
+            self._debug_counter += 1
         
         if not words:
             raise ValueError(f"FastText: No words found in entity name: '{entity_name}'")
@@ -188,13 +199,22 @@ class EmbeddingModel:
         
         # Verbose debug for random embeddings
         if self.cfg.verbose:
+            print("\n" + "=" * 70)
             print(f"[Random Embeddings Debug] Processing {num_sentences} sentences")
+            print("=" * 70)
+            
             for i, sentence in enumerate(sentences[:5]):  # Show first 5
                 entity_name = entity_names[i]
-                print(f"[Random Debug {i+1}] Sentence: '{sentence}'")
-                print(f"[Random Debug {i+1}] Entity: '{entity_name}'")
-                print(f"[Random Debug {i+1}] Note: Random embeddings don't use actual tokens")
+                print(f"\nInstance #{i+1}:")
+                print(f"  Sentence: '{sentence}'")
+                print(f"  Entity:   '{entity_name}'")
+                print(f"  Note:     Random embeddings don't use actual tokens")
                 print("-" * 50)
+            
+            if num_sentences > 5:
+                print(f"... and {num_sentences - 5} more instances")
+            
+            print("=" * 70 + "\n")
         
         # Generate random embeddings (single layer only)
         embeddings = torch.randn(num_sentences, self.cfg.random_dim) * self.cfg.random_std
@@ -243,11 +263,14 @@ class EmbeddingModel:
                     if self.cfg.verbose and i < 5:
                         entity_tokens = self._tokenizer.tokenize(entity_name)
                         sentence_tokens = self._tokenizer.tokenize(sentence)
-                        print(f"[Debug {i+1}] ERROR: Entity tokens not found!")
-                        print(f"[Debug {i+1}] Sentence: '{sentence}'")
-                        print(f"[Debug {i+1}] Entity: '{entity_name}'")
-                        print(f"[Debug {i+1}] Entity tokens: {entity_tokens}")
-                        print(f"[Debug {i+1}] Sentence tokens: {sentence_tokens}")
+                        print("\n" + "!" * 60)
+                        print(f"[ERROR] Instance #{i+1} - Entity tokens not found!")
+                        print("!" * 60)
+                        print(f"Sentence: '{sentence}'")
+                        print(f"Entity:   '{entity_name}'")
+                        print(f"Entity tokens:   {entity_tokens}")
+                        print(f"Sentence tokens: {sentence_tokens}")
+                        print("!" * 60 + "\n")
                     raise ValueError(f"Transformer: Entity tokens '{entity_name}' not found in sentence tokens for: '{sentence}'")
                 
                 # エンティティ名のトークン範囲内で処理
@@ -266,19 +289,23 @@ class EmbeddingModel:
                     all_tokens_with_ids = [(self._tokenizer.decode([tid]), tid.item()) for tid in token_ids]
                     entity_tokens_with_ids = all_tokens_with_ids[entity_start_idx:entity_end_idx+1]
                     
-                    print(f"[Debug {i+1}] Sentence: '{sentence}'")
-                    print(f"[Debug {i+1}] Entity: '{entity_name}'")
-                    print(f"[Debug {i+1}] Entity tokens: {entity_tokens}")
-                    print(f"[Debug {i+1}] All sentence tokens: {sentence_tokens}")
-                    print(f"[Debug {i+1}] Token range: {entity_start_idx}-{entity_end_idx}")
-                    print(f"[Debug {i+1}] Actually used tokens+IDs: {entity_tokens_with_ids}")
-                    print(f"[Debug {i+1}] Method: {self.cfg.method}")
-                    print(f"[Debug {i+1}] IMPORTANT: Using CONTEXTUALIZED embeddings!")
-                    print(f"[Debug {i+1}] -> The model processes the ENTIRE sentence first")
-                    print(f"[Debug {i+1}] -> Then extracts embeddings from entity token range")
+                    print("\n\n" + "=" * 80)
+                    print(f"[Transformer Debug] Processing instance #{i+1}\n")
+                    print(f"Sentence: '{sentence}'")
+                    print(f"Entity:   '{entity_name}'")
+                    print(f"Method:   {self.cfg.method}")
+                    print(f"Token range: {entity_start_idx}-{entity_end_idx}")
+                    print("-" * 40)
+                    print(f"Entity tokens:     {entity_tokens}")
+                    print(f"All sentence tokens: {sentence_tokens}")
+                    print(f"Used tokens+IDs:   {entity_tokens_with_ids}")
+                    print("-" * 40)
+                    print("IMPORTANT: Using CONTEXTUALIZED embeddings!")
+                    print("-> The model processes the ENTIRE sentence first")
+                    print("-> Then extracts embeddings from entity token range")
                     if entity_tokens:
                         context_tokens = sentence_tokens[:max(0, entity_start_idx)]
-                        print(f"[Debug {i+1}] -> '{entity_tokens[-1]}' is contextualized by: {context_tokens}")
+                        print(f"-> '{entity_tokens[-1]}' is contextualized by: {context_tokens}")
                 
                 if self.cfg.method == "average":
                     # エンティティ名トークンの平均
@@ -294,12 +321,12 @@ class EmbeddingModel:
                                          for idx in valid_indices]
                             used_token_ids = [token_ids[entity_start_idx + idx].item() 
                                             for idx in valid_indices]
-                            print(f"[Debug {i+1}] AVERAGE method: Using {len(used_tokens)} tokens")
-                            print(f"[Debug {i+1}] -> Tokens used for average: {list(zip(used_tokens, used_token_ids))}")
+                            print(f"AVERAGE method: Using {len(used_tokens)} tokens")
+                            print(f"-> Tokens used for average: {list(zip(used_tokens, used_token_ids))}")
                     else:
                         emb = entity_hidden.mean(dim=0)
                         if self.cfg.verbose and i < 5:
-                            print(f"[Debug {i+1}] AVERAGE method: No valid tokens, using mean of all entity tokens")
+                            print("AVERAGE method: No valid tokens, using mean of all entity tokens")
                 else:  # last_token
                     # エンティティ名の最後のトークン
                     if entity_mask.sum() > 0:
@@ -311,12 +338,15 @@ class EmbeddingModel:
                         if self.cfg.verbose and i < 5:
                             last_token = self._tokenizer.decode([token_ids[entity_start_idx + last_valid_idx]])
                             last_token_id = token_ids[entity_start_idx + last_valid_idx].item()
-                            print(f"[Debug {i+1}] LAST_TOKEN method: Using the last token")
-                            print(f"[Debug {i+1}] -> Last token used: ('{last_token}', {last_token_id})")
+                            print(f"LAST_TOKEN method: Using the last token")
+                            print(f"-> Last token used: ('{last_token}', {last_token_id})")
                     else:
                         emb = entity_hidden[-1]
                         if self.cfg.verbose and i < 5:
-                            print(f"[Debug {i+1}] LAST_TOKEN method: No valid tokens, using last entity token")
+                            print("LAST_TOKEN method: No valid tokens, using last entity token")
+                
+                if self.cfg.verbose and i < 5:
+                    print("=" * 80 + "\n")
                 
                 embeddings.append(emb)
             
@@ -338,13 +368,13 @@ class EmbeddingModel:
         char_start = sentence.lower().find(entity_name.lower())
         if char_start == -1:
             if self.cfg.verbose and batch_idx < 5:
-                print(f"[Token Range] ERROR: Entity '{entity_name}' not found in sentence '{sentence}'")
+                print(f"\n[Token Range ERROR] Entity '{entity_name}' not found in sentence '{sentence}'\n")
             return None, None
         
         char_end = char_start + len(entity_name)
         
         if self.cfg.verbose and batch_idx < 5:
-            print(f"[Token Range] Entity '{entity_name}' found at character range: {char_start}-{char_end-1}")
+            print(f"\n[Token Range] Entity '{entity_name}' found at character range: {char_start}-{char_end-1}")
             print(f"[Token Range] Entity text: '{sentence[char_start:char_end]}'")
         
         # Fast tokenizerのoffset mappingを試行
@@ -403,12 +433,12 @@ class EmbeddingModel:
             if self.cfg.verbose and batch_idx < 5:
                 entity_tokens_with_ids = [(self._tokenizer.decode([token_ids[i]]), token_ids[i].item()) for i in range(entity_start_idx, entity_end_idx + 1)]
                 print(f"[Token Range] Found entity at token range (fallback): {entity_start_idx}-{entity_end_idx}")
-                print(f"[Token Range] Entity tokens+IDs: {entity_tokens_with_ids}\n\n")
+                print(f"[Token Range] Entity tokens+IDs: {entity_tokens_with_ids}")
             
             return entity_start_idx, entity_end_idx
         
         if self.cfg.verbose and batch_idx < 5:
-            print(f"[Token Range] ERROR: Could not find token range for entity")
+            print("[Token Range ERROR] Could not find token range for entity")
         
         return None, None
 

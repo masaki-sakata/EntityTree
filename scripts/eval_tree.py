@@ -1,969 +1,539 @@
 #!/usr/bin/env python
 # =============================================================================
-# eval_tree.py
+# eval_tree.py - Tree Distance Evaluation
 # =============================================================================
 """
-Evaluate tree similarities using R TreeDist package.
+Evaluate predicted trees against gold trees using Jaccard-Robinson-Foulds distance.
 
-Computes 6 tree distance metrics between gold tree (from JSONL) and 
-predicted trees (from hierarchy algorithm):
-1. Jaccard-Robinson-Foulds distance (k=1)
-2. Jaccard-Robinson-Foulds distance (k=2)  
-3. Matching split distance
-4. Phylogenetic information distance
-5. Clustering information distance
-6. Path distance (Frobenius distance of shortest path matrices)
+This script:
+1. Reconstructs gold tree using only entity nodes (is_entity=True)
+2. Builds predicted tree using the same approach as visualize_tree.py
+3. Calculates Jaccard-Robinson-Foulds distance with k=1 and k=2
+4. Provides debug visualizations of both trees
 """
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
-from typing import Sequence, Dict, List, Tuple, Set
+from typing import Dict, Set, List, Tuple, Optional
 import pandas as pd
 import numpy as np
+from itertools import combinations
 
 import util
 from embeddings import EmbeddingConfig, EmbeddingModel
 from hierarchy_node import HierarchyNode
-import summarization
+from html_tree_encoding import HTMLTreeEncoding as TreeEncoding
+from multibranch_tree_encoding import MultiBranchTreeEncoding
+import template
 
-# R interface
+# Optional dependencies for PNG export
 try:
-    import rpy2.robjects as robjects
-    from rpy2.robjects import pandas2ri, numpy2ri
-    from rpy2.robjects.packages import importr
-    pandas2ri.activate()
-    numpy2ri.activate()
-    
-    # Import R packages
-    base = importr('base')
-    utils = importr('utils')
-    ape = importr('ape')
-    treedist = importr('TreeDist')
-    
-    HAS_R = True
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    import time
+    HAS_SELENIUM = True
 except ImportError:
-    print("Warning: rpy2 not available. Install with: pip install rpy2")
-    print("Also install R packages: install.packages(c('ape', 'TreeDist'))")
-    HAS_R = False
+    HAS_SELENIUM = False
 
-# --------------------------------------------------------------------------- #
-# Tree Structure Classes                                                      #
-# --------------------------------------------------------------------------- #
+# Profession color mapping (same as visualize_tree.py)
+PROFESSION_COLORS = {
+    "Politician": "#322FEA",      
+    "Actor": "#FF9500",          
+    "Athlete": "#E93434",         
+    "Musician": "#32E352",        
+    "Scientist": "#00FBFF",       
+    "Business Person": "#E221E2",  
+    "Person": "#A0A0A0"           
+}
+
 
 class TreeNode:
-    def __init__(self, name: str, is_leaf: bool = False):
+    """Simple tree node for gold tree reconstruction."""
+    def __init__(self, name: str, is_entity: bool = False):
         self.name = name
-        self.is_leaf = is_leaf
+        self.is_entity = is_entity
         self.children: List[TreeNode] = []
-        self.parent: TreeNode | None = None
+        self.parent: Optional[TreeNode] = None
     
     def add_child(self, child: 'TreeNode'):
         child.parent = self
         self.children.append(child)
     
-    def get_leaves(self) -> List[str]:
-        """Get all leaf names in this subtree safely"""
-        try:
-            return self._get_leaves_recursive(max_depth=50)
-        except RecursionError:
-            print("WARNING: RecursionError in get_leaves, using iterative approach")
-            return self._get_leaves_iterative()
-    
-    def _get_leaves_recursive(self, max_depth: int = 50) -> List[str]:
-        """Recursive leaf collection with depth limit"""
-        if max_depth <= 0:
-            return [self.name] if self.is_leaf else []
-            
-        if self.is_leaf:
-            return [self.name]
+    def get_entity_leaves(self) -> Set[str]:
+        """Get all entity leaf nodes under this node."""
+        if self.is_entity:
+            return {self.name}
         
-        leaves = []
-        for child in self.children[:20]:  # Limit children processed
-            leaves.extend(child._get_leaves_recursive(max_depth - 1))
-        return leaves
+        entities = set()
+        for child in self.children:
+            entities.update(child.get_entity_leaves())
+        return entities
+
+
+def build_gold_tree(df: pd.DataFrame) -> Tuple[Dict[str, List[str]], List[str], Dict[str, str]]:
+    """
+    Build gold tree structure from JSONL data.
     
-    def _get_leaves_iterative(self) -> List[str]:
-        """Iterative leaf collection to avoid recursion issues"""
-        leaves = []
-        queue = [self]
-        processed = 0
-        max_nodes = 1000
-        
-        while queue and processed < max_nodes:
-            current = queue.pop(0)
-            processed += 1
-            
-            if current.is_leaf:
-                leaves.append(current.name)
-            else:
-                # Add children to queue, but limit
-                for child in current.children[:10]:
-                    if len(queue) < 500:  # Limit queue size
-                        queue.append(child)
-        
-        return leaves
-
-# --------------------------------------------------------------------------- #
-# CLI                                                                         #
-# --------------------------------------------------------------------------- #
-
-def build_arg_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Evaluate tree distances using TreeDist")
-    p.add_argument("--input", required=True, help="Input JSONL file with gold tree")
-    p.add_argument("--output", required=True, help="Output CSV file for results")
-
-    # Embedding params --------------------------------------------------------
-    p.add_argument(
-        "--model",
-        choices=["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext"],
-        default="gpt2",
-    )
-    p.add_argument("--method", choices=["average", "last_token"], default="last_token")
-    p.add_argument(
-        "--layer",
-        default="all",
-        help='Transformer hidden layer index (0-based). Use "all" for every layer.',
-    )
-    p.add_argument("--device", default="cuda")
-
-    return p
-
-# --------------------------------------------------------------------------- #
-# Gold Tree Parsing                                                          #
-# --------------------------------------------------------------------------- #
-
-def parse_gold_tree(jsonl_path: str) -> TreeNode:
-    """Parse the gold tree from JSONL format"""
-    df = pd.read_json(jsonl_path, lines=True)
+    Returns:
+        - category to entities mapping
+        - list of entity names (in consistent order) 
+        - profession mapping
+    """
+    # Extract entity names and profession mapping
+    entity_names = []
+    profession_map = {}
+    category_to_entities = {}
     
-    # Build node lookup
-    nodes = {}
     for _, row in df.iterrows():
-        qid = row['qid']
         name = row['wiki_title']
-        is_leaf = row['is_entity']
-        nodes[qid] = TreeNode(name, is_leaf)
-    
-    # Build parent-child relationships
-    root = None
-    for _, row in df.iterrows():
-        qid = row['qid']
-        node = nodes[qid]
+        is_entity = row['is_entity']
         
-        if row['edges']:
-            for edge in row['edges']:
-                target_qid = edge['target_qid']
-                if target_qid in nodes:
-                    if edge['target_label'] == 'Person':
-                        # This node is a child of Person (root)
-                        if target_qid not in [nodes[qid].name for nodes in nodes.values()]:
-                            # Person is the root
-                            root = nodes[target_qid]
-                        root.add_child(node)
-                    else:
-                        # Regular parent-child relationship
-                        parent = nodes[target_qid]
-                        parent.add_child(node)
+        if is_entity:
+            entity_names.append(name)
+            # Extract profession info
+            if 'edges' in row and row['edges']:
+                profession = row['edges'][0]['target_label']
+                profession_map[name] = profession
+                
+                # Add to category mapping
+                if profession not in category_to_entities:
+                    category_to_entities[profession] = []
+                category_to_entities[profession].append(name)
         else:
-            # Node with no edges might be root
-            if root is None:
-                root = node
+            # This is a category
+            profession_map[name] = name
     
-    # Find actual root (node with no parent)
-    if root is None:
-        for node in nodes.values():
-            if node.parent is None:
-                root = node
-                break
+    entity_names.sort()  # Ensure consistent ordering
     
-    return root
+    return category_to_entities, entity_names, profession_map
 
-def build_gold_tree_from_jsonl(jsonl_path: str) -> TreeNode:
-    """Build gold tree structure from JSONL file"""
-    df = pd.read_json(jsonl_path, lines=True)
+
+def reconstruct_entity_tree_adjacency(df: pd.DataFrame, entity_names: List[str]) -> Tuple[Dict[int, List[int]], Dict[int, str]]:
+    """
+    Reconstruct tree adjacency using actual hierarchical structure from the data.
     
-    print(f"Loaded {len(df)} rows from JSONL")
+    This creates a general tree where:
+    - Leaf nodes are entities (is_entity=True, indices 0 to n-1)
+    - Internal nodes are categories (is_entity=False)
+    - Structure follows the actual parent-child relationships in the data
+    - Works with arbitrary hierarchy depths and structures
+    """
+    entity_to_idx = {name: idx for idx, name in enumerate(entity_names)}
+    n_entities = len(entity_names)
     
-    # Create nodes
-    nodes = {}
-    for _, row in df.iterrows():
-        qid = row['qid']
-        name = row['wiki_title']
-        is_leaf = row['is_entity']
-        nodes[qid] = TreeNode(name, is_leaf)
+    # Build mappings and track relationships
+    node_labels = {}
+    node_name_to_id = {}
+    next_internal_id = n_entities
     
-    print(f"Created {len(nodes)} nodes")
+    # Map entity names to their IDs and labels
+    for idx, name in enumerate(entity_names):
+        node_labels[idx] = name
+        node_name_to_id[name] = idx
     
-    # Debug: Print some node info
-    for i, (qid, node) in enumerate(nodes.items()):
-        if i < 5:  # Print first 5
-            print(f"Node {qid}: {node.name}, is_leaf={node.is_leaf}")
+    # Create internal nodes for all categories
+    category_nodes = df[df['is_entity'] == False]
+    name_to_children = {}  # category_name -> list of child names
     
-    # Build hierarchy based on edges - but be careful about parent-child relationships
-    parent_child_pairs = []
-    
-    for _, row in df.iterrows():
-        qid = row['qid']
+    # First pass: collect all category nodes and their children
+    for _, row in category_nodes.iterrows():
+        category_name = row['wiki_title']
+        edges = row.get('edges', [])
         
-        if 'edges' in row and row['edges']:
-            for edge in row['edges']:
-                target_qid = edge['target_qid']
-                if target_qid in nodes:
-                    # Store parent-child relationship
-                    parent_child_pairs.append((target_qid, qid))  # (parent, child)
-    
-    print(f"Found {len(parent_child_pairs)} parent-child relationships")
-    
-    # Check for cycles before building tree
-    def has_cycle(pairs):
-        graph = {}
-        for parent, child in pairs:
-            if parent not in graph:
-                graph[parent] = []
-            graph[parent].append(child)
+        # Assign ID to this category if not already assigned
+        if category_name not in node_name_to_id:
+            node_name_to_id[category_name] = next_internal_id
+            node_labels[next_internal_id] = category_name
+            next_internal_id += 1
         
-        visited = set()
-        rec_stack = set()
+        # Collect children
+        children_names = [edge['target_label'] for edge in edges]
+        name_to_children[category_name] = children_names
+    
+    # Second pass: build adjacency relationships (avoid cycles)
+    adjacency = {}
+    
+    for category_name, children_names in name_to_children.items():
+        category_id = node_name_to_id[category_name]
+        children_ids = []
         
-        def dfs(node):
-            if node in rec_stack:
-                return True
-            if node in visited:
-                return False
-            
-            visited.add(node)
-            rec_stack.add(node)
-            
-            for neighbor in graph.get(node, []):
-                if dfs(neighbor):
-                    return True
-            
-            rec_stack.remove(node)
+        for child_name in children_names:
+            if child_name in node_name_to_id:
+                child_id = node_name_to_id[child_name]
+                
+                # Avoid adding parent as child (prevent cycles)
+                # Don't add a node as child of its own descendant
+                if not would_create_cycle(category_id, child_id, adjacency):
+                    children_ids.append(child_id)
+        
+        if children_ids:
+            adjacency[category_id] = children_ids
+    
+    return adjacency, node_labels
+
+
+def would_create_cycle(parent_id: int, child_id: int, adjacency: Dict[int, List[int]]) -> bool:
+    """Check if adding child_id as child of parent_id would create a cycle."""
+    # If child_id is already an ancestor of parent_id, adding this edge would create a cycle
+    visited = set()
+    
+    def is_ancestor(potential_ancestor: int, node: int) -> bool:
+        if node in visited:
             return False
+        visited.add(node)
         
-        for node in graph:
-            if node not in visited:
-                if dfs(node):
+        if potential_ancestor == node:
+            return True
+        
+        if node in adjacency:
+            for child in adjacency[node]:
+                if is_ancestor(potential_ancestor, child):
                     return True
         return False
     
-    if has_cycle(parent_child_pairs):
-        print("WARNING: Cycle detected in tree structure!")
-        # Fallback to simple structure
-        return create_simple_tree_structure(df, nodes)
-    
-    # Build tree without cycles
-    children_count = {}
-    for parent_qid, child_qid in parent_child_pairs:
-        if parent_qid in nodes and child_qid in nodes:
-            parent = nodes[parent_qid]
-            child = nodes[child_qid]
-            parent.add_child(child)
-            children_count[parent_qid] = children_count.get(parent_qid, 0) + 1
-    
-    # Find root (node with no parent)
-    all_children = set(child for _, child in parent_child_pairs)
-    root_candidates = [qid for qid in nodes.keys() if qid not in all_children]
-    
-    print(f"Root candidates: {root_candidates}")
-    
-    if len(root_candidates) == 1:
-        root_qid = root_candidates[0]
-        print(f"Root found: {nodes[root_qid].name}")
-        return nodes[root_qid]
-    elif len(root_candidates) > 1:
-        # Choose the one with most children
-        best_root = max(root_candidates, key=lambda x: children_count.get(x, 0))
-        print(f"Multiple roots, choosing: {nodes[best_root].name}")
-        return nodes[best_root]
-    else:
-        # Fallback
-        print("No clear root found, using fallback")
-        return create_simple_tree_structure(df, nodes)
+    return is_ancestor(parent_id, child_id)
 
-def create_simple_tree_structure(df, nodes):
-    """Create a simple tree structure when the complex one fails"""
-    print("Creating simple tree structure...")
-    
-    # Find Person node as root
-    person_node = None
-    for qid, node in nodes.items():
-        if node.name == "Person":
-            person_node = node
-            break
-    
-    if person_node is None:
-        # Create a dummy root
-        person_node = TreeNode("Root", is_leaf=False)
-    
-    # Group entities by their occupation category
-    categories = {}
-    entities = []
-    
-    for _, row in df.iterrows():
-        if row['is_entity']:
-            entities.append(nodes[row['qid']])
-        else:
-            # This is a category
-            category_name = row['wiki_title']
-            if category_name != "Person":
-                categories[row['qid']] = nodes[row['qid']]
-    
-    # Add categories as children of Person
-    for cat_node in categories.values():
-        person_node.add_child(cat_node)
-    
-    # Add entities to appropriate categories based on edges
-    for _, row in df.iterrows():
-        if row['is_entity'] and 'edges' in row and row['edges']:
-            entity_node = nodes[row['qid']]
-            for edge in row['edges']:
-                target_qid = edge['target_qid']
-                if target_qid in categories:
-                    categories[target_qid].add_child(entity_node)
-                    break
-    
-    print(f"Simple tree: Root with {len(person_node.children)} categories")
-    return person_node
 
-# --------------------------------------------------------------------------- #
-# Tree Format Conversion                                                     #
-# --------------------------------------------------------------------------- #
-
-def tree_to_newick(node: TreeNode, leaf_names: Set[str] = None, visited: Set[int] = None, max_depth: int = 100) -> str:
-    """Convert tree to Newick format for R with cycle detection"""
-    if visited is None:
-        visited = set()
+def jaccard_robinson_foulds_distance(tree1_adj: Dict[int, List[int]], 
+                                   tree2_adj: Dict[int, List[int]], 
+                                   n_leaves: int, 
+                                   k: int) -> float:
+    """
+    Calculate Jaccard-Robinson-Foulds distance between two trees.
     
-    if max_depth <= 0:
-        print("WARNING: Maximum recursion depth reached in tree_to_newick")
-        return "truncated"
+    Args:
+        tree1_adj: Adjacency list for tree 1
+        tree2_adj: Adjacency list for tree 2
+        n_leaves: Number of leaf nodes
+        k: Parameter for JRF distance (1 or 2)
     
-    # Check for cycles
-    node_id = id(node)
-    if node_id in visited:
-        print(f"WARNING: Cycle detected at node {node.name}")
-        return "cycle_detected"
-    
-    visited.add(node_id)
-    
-    if leaf_names is None:
-        # First pass: collect all leaf names safely
-        leaf_names = set()
-        def collect_leaves_safe(n, depth=0):
-            if depth > 50:  # Limit recursion depth
-                return
-            if n.is_leaf:
-                leaf_names.add(n.name)
-            for child in n.children[:10]:  # Limit number of children processed
-                collect_leaves_safe(child, depth + 1)
+    Returns:
+        JRF distance value
+    """
+    def get_all_splits(adj: Dict[int, List[int]], n_leaves: int) -> Set[frozenset]:
+        """Get all splits (bipartitions) defined by internal nodes."""
+        splits = set()
+        visited = set()  # To avoid infinite recursion
         
-        try:
-            collect_leaves_safe(node)
-        except RecursionError:
-            print("WARNING: Recursion error in collect_leaves, using fallback")
-            # Fallback: just use node names directly
-            leaf_names = {node.name}
-    
-    def to_newick_recursive(n: TreeNode, depth: int = 0) -> str:
-        if depth > max_depth:
-            return "max_depth_reached"
+        def get_leaves_under_node(node_id: int, path: Set[int] = None) -> Set[int]:
+            """Get all leaf nodes under a given node with cycle detection."""
+            if path is None:
+                path = set()
             
-        if n.is_leaf:
-            # Clean name for Newick format
-            clean_name = n.name.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '').replace(';', '').replace(':', '')
-            return clean_name
-        
-        if not n.children:
-            clean_name = n.name.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '').replace(';', '').replace(':', '')
-            return clean_name
-        
-        # Limit number of children to prevent explosion
-        children_to_process = n.children[:20]  # Process at most 20 children
-        child_strings = []
-        
-        for child in children_to_process:
-            try:
-                child_str = to_newick_recursive(child, depth + 1)
-                child_strings.append(child_str)
-            except RecursionError:
-                child_strings.append("recursion_error")
-                break
-        
-        if not child_strings:
-            clean_name = n.name.replace(' ', '_')
-            return clean_name
+            # Cycle detection
+            if node_id in path:
+                return set()
             
-        return f"({','.join(child_strings)})"
-    
-    try:
-        newick = to_newick_recursive(node)
-        if not newick.endswith(';'):
-            newick += ';'
-        
-        # Validate newick string
-        if len(newick) > 10000:  # If too long, truncate
-            print("WARNING: Newick string too long, truncating")
-            # Create simple structure with just leaf names
-            leaves = [n.name.replace(' ', '_') for n in collect_leaf_nodes_safe(node)][:50]
-            newick = f"({','.join(leaves)});"
+            if node_id < n_leaves:
+                return {node_id}
             
-        return newick
-    except RecursionError:
-        print("WARNING: RecursionError in tree_to_newick, creating fallback structure")
-        # Emergency fallback: create flat structure
-        leaves = [n.name.replace(' ', '_') for n in collect_leaf_nodes_safe(node)][:20]
-        return f"({','.join(leaves)});"
-
-def collect_leaf_nodes_safe(node: TreeNode, max_nodes: int = 100) -> List[TreeNode]:
-    """Safely collect leaf nodes without deep recursion"""
-    leaves = []
-    queue = [node]
-    processed = 0
-    
-    while queue and processed < max_nodes:
-        current = queue.pop(0)
-        processed += 1
-        
-        if current.is_leaf:
-            leaves.append(current)
-        else:
-            # Add children to queue, but limit the number
-            for child in current.children[:10]:  # Max 10 children per node
-                if len(queue) < 1000:  # Limit queue size
-                    queue.append(child)
-    
-    return leaves
-
-def hierarchy_to_tree(adjacency: Dict[int, Tuple[int, int]], 
-                     sentences: List[str], 
-                     n_leaves: int) -> TreeNode:
-    """Convert hierarchy adjacency to TreeNode structure"""
-    
-    # Create leaf nodes
-    nodes = {}
-    for i in range(n_leaves):
-        clean_name = sentences[i].replace(' ', '_').replace('(', '').replace(')', '').replace(',', '').replace(';', '').replace(':', '')
-        nodes[i] = TreeNode(clean_name, is_leaf=True)
-    
-    # Create internal nodes and build tree bottom-up
-    max_node = max(adjacency.keys()) if adjacency else n_leaves - 1
-    
-    for node_id in range(n_leaves, max_node + 1):
-        nodes[node_id] = TreeNode(f"node_{node_id}", is_leaf=False)
-    
-    # Build parent-child relationships
-    for parent_id, (right_id, left_id) in adjacency.items():
-        parent = nodes[parent_id]
-        if right_id in nodes:
-            parent.add_child(nodes[right_id])
-        if left_id in nodes:
-            parent.add_child(nodes[left_id])
-    
-    # Find root (node with no parent)
-    root = None
-    for node in nodes.values():
-        if node.parent is None and not node.is_leaf:
-            root = node
-            break
-    
-    return root
-
-# --------------------------------------------------------------------------- #
-# Distance Computation                                                       #
-# --------------------------------------------------------------------------- #
-
-def compute_tree_distances(gold_newick: str, pred_newick: str) -> Dict[str, float]:
-    """Compute tree distances using R TreeDist package"""
-    if not HAS_R:
-        print("Warning: rpy2 not available. Using Python fallback calculations.")
-        return compute_tree_distances_python_fallback(gold_newick, pred_newick)
-    
-    results = {}
-    
-    try:
-        # Read trees in R
-        robjects.r(f'''
-        gold_tree <- ape::read.tree(text="{gold_newick}")
-        pred_tree <- ape::read.tree(text="{pred_newick}")
-        ''')
-        
-        # Compute distances
-        
-        # 1. Jaccard-Robinson-Foulds (k=1)
-        jrf_k1 = robjects.r('TreeDist::JaccardRobinsonFoulds(gold_tree, pred_tree, k=1)')[0]
-        results['JRF_k1'] = float(jrf_k1)
-        
-        # 2. Jaccard-Robinson-Foulds (k=2)  
-        jrf_k2 = robjects.r('TreeDist::JaccardRobinsonFoulds(gold_tree, pred_tree, k=2)')[0]
-        results['JRF_k2'] = float(jrf_k2)
-        
-        # 3. Matching Split Distance
-        msd = robjects.r('TreeDist::MatchingSplitDistance(gold_tree, pred_tree)')[0]
-        results['MatchingSplit'] = float(msd)
-        
-        # 4. Phylogenetic Information Distance
-        pid = robjects.r('TreeDist::PhylogeneticInfoDistance(gold_tree, pred_tree)')[0]
-        results['PhylogeneticInfo'] = float(pid)
-        
-        # 5. Clustering Information Distance
-        cid = robjects.r('TreeDist::ClusteringInfoDistance(gold_tree, pred_tree)')[0]
-        results['ClusteringInfo'] = float(cid)
-        
-        # 6. Path Distance
-        path_dist = robjects.r('TreeDist::PathDist(gold_tree, pred_tree)')[0]
-        results['PathDistance'] = float(path_dist)
-        
-    except Exception as e:
-        print(f"Error computing R distances: {e}")
-        print("Falling back to Python implementations...")
-        return compute_tree_distances_python_fallback(gold_newick, pred_newick)
-    
-    return results
-
-def compute_tree_distances_python_fallback(gold_newick: str, pred_newick: str) -> Dict[str, float]:
-    """Fallback distance computation using Python when R is not available"""
-    print("Computing basic tree distances using Python fallback...")
-    
-    try:
-        # Parse tree structures (not just leaves)
-        gold_structure = parse_tree_structure(gold_newick)
-        pred_structure = parse_tree_structure(pred_newick)
-        
-        print(f"Gold tree clusters: {len(gold_structure['clusters'])}")
-        print(f"Pred tree clusters: {len(pred_structure['clusters'])}")
-        
-        # Get all leaves
-        all_leaves = set(gold_structure['leaves']) | set(pred_structure['leaves'])
-        n_leaves = len(all_leaves)
-        
-        if n_leaves == 0:
-            return {metric: np.nan for metric in ['JRF_k1', 'JRF_k2', 'MatchingSplit', 'PhylogeneticInfo', 'ClusteringInfo', 'PathDistance']}
-        
-        # Compute clustering-based distances
-        
-        # 1. Robinson-Foulds style: compare splits
-        gold_splits = get_tree_splits(gold_structure)
-        pred_splits = get_tree_splits(pred_structure)
-        
-        # Convert splits to comparable format
-        gold_split_set = set()
-        pred_split_set = set()
-        
-        for split in gold_splits:
-            if len(split) > 1 and len(split) < n_leaves:  # Non-trivial splits
-                gold_split_set.add(frozenset(split))
-        
-        for split in pred_splits:
-            if len(split) > 1 and len(split) < n_leaves:  # Non-trivial splits
-                pred_split_set.add(frozenset(split))
-        
-        # Robinson-Foulds distance
-        symmetric_diff = len(gold_split_set ^ pred_split_set)
-        total_splits = len(gold_split_set | pred_split_set)
-        rf_distance = symmetric_diff
-        
-        # Jaccard-based distance
-        intersection = len(gold_split_set & pred_split_set)
-        union = len(gold_split_set | pred_split_set)
-        jaccard_sim = intersection / union if union > 0 else 0.0
-        jaccard_dist = 1.0 - jaccard_sim
-        
-        # 2. Clustering comparison using leaf assignments
-        # Create cluster assignments for each leaf
-        gold_assignments = create_leaf_cluster_assignments(gold_structure)
-        pred_assignments = create_leaf_cluster_assignments(pred_structure)
-        
-        # Calculate clustering similarity
-        if len(gold_assignments) > 0 and len(pred_assignments) > 0:
-            # Use Adjusted Rand Index as a proxy for clustering similarity
-            cluster_distance = calculate_cluster_distance(gold_assignments, pred_assignments, all_leaves)
-        else:
-            cluster_distance = 1.0
-        
-        # 3. Path distance approximation
-        # Compare pairwise relationships
-        path_distance = calculate_path_distance_approx(gold_structure, pred_structure, all_leaves)
-        
-        results = {
-            'JRF_k1': rf_distance,
-            'JRF_k2': rf_distance * 1.1,  # Approximation for k=2
-            'MatchingSplit': rf_distance,
-            'PhylogeneticInfo': cluster_distance * n_leaves,
-            'ClusteringInfo': jaccard_dist,
-            'PathDistance': path_distance
-        }
-        
-        print(f"Computed distances: {results}")
-        print("Note: These are simplified distance approximations.")
-        print("For accurate results, please install R with TreeDist package.")
-        
-    except Exception as e:
-        print(f"Error in Python fallback: {e}")
-        import traceback
-        traceback.print_exc()
-        results = {
-            'JRF_k1': np.nan,
-            'JRF_k2': np.nan,
-            'MatchingSplit': np.nan,
-            'PhylogeneticInfo': np.nan,
-            'ClusteringInfo': np.nan,
-            'PathDistance': np.nan
-        }
-    
-    return results
-
-def parse_tree_structure(newick: str) -> Dict:
-    """Parse Newick string to extract tree structure"""
-    # Remove semicolon and whitespace
-    newick = newick.replace(';', '').strip()
-    
-    # Extract all leaves and clusters
-    leaves = []
-    clusters = []
-    
-    # Simple parsing: find all parentheses groups and individual items
-    import re
-    
-    # Find all leaf names (items not in parentheses or at the end of parentheses)
-    leaf_pattern = r'([a-zA-Z_][a-zA-Z0-9_]*)'
-    all_items = re.findall(leaf_pattern, newick)
-    leaves = list(set(all_items))  # Remove duplicates
-    
-    # Find clusters (parentheses groups)
-    cluster_pattern = r'\(([^()]+)\)'
-    cluster_matches = re.findall(cluster_pattern, newick)
-    
-    for cluster_str in cluster_matches:
-        cluster_items = re.findall(leaf_pattern, cluster_str)
-        if len(cluster_items) > 1:
-            clusters.append(cluster_items)
-    
-    return {
-        'leaves': leaves,
-        'clusters': clusters,
-        'raw_newick': newick
-    }
-
-def get_tree_splits(tree_structure: Dict) -> List[List[str]]:
-    """Get all splits (bipartitions) from tree structure"""
-    splits = []
-    all_leaves = set(tree_structure['leaves'])
-    
-    for cluster in tree_structure['clusters']:
-        cluster_set = set(cluster)
-        if len(cluster_set) > 1 and len(cluster_set) < len(all_leaves):
-            splits.append(list(cluster_set))
-            # Also add the complement
-            complement = list(all_leaves - cluster_set)
-            if len(complement) > 1:
-                splits.append(complement)
-    
-    return splits
-
-def create_leaf_cluster_assignments(tree_structure: Dict) -> Dict[str, int]:
-    """Create cluster assignments for each leaf"""
-    assignments = {}
-    
-    # Assign cluster IDs based on which clusters each leaf belongs to
-    for i, cluster in enumerate(tree_structure['clusters']):
-        for leaf in cluster:
-            if leaf not in assignments:
-                assignments[leaf] = []
-            assignments[leaf].append(i)
-    
-    # Convert to single cluster ID (use smallest cluster for each leaf)
-    final_assignments = {}
-    for leaf, cluster_ids in assignments.items():
-        if cluster_ids:
-            final_assignments[leaf] = min(cluster_ids)
-        else:
-            # Singleton cluster
-            final_assignments[leaf] = -1
-    
-    return final_assignments
-
-def calculate_cluster_distance(gold_assignments: Dict, pred_assignments: Dict, all_leaves: set) -> float:
-    """Calculate clustering distance between two cluster assignments"""
-    if not all_leaves:
-        return 0.0
-    
-    # Count agreement and disagreement
-    agreements = 0
-    total_pairs = 0
-    
-    leaves_list = list(all_leaves)
-    n = len(leaves_list)
-    
-    for i in range(n):
-        for j in range(i + 1, n):
-            leaf1, leaf2 = leaves_list[i], leaves_list[j]
+            if node_id not in adj:
+                return set()
             
-            # Check if both leaves are in the same cluster in both trees
-            gold_same = (leaf1 in gold_assignments and leaf2 in gold_assignments and 
-                        gold_assignments[leaf1] == gold_assignments[leaf2])
-            pred_same = (leaf1 in pred_assignments and leaf2 in pred_assignments and 
-                        pred_assignments[leaf1] == pred_assignments[leaf2])
+            leaves = set()
+            new_path = path | {node_id}
             
-            if gold_same == pred_same:
-                agreements += 1
-            
-            total_pairs += 1
-    
-    if total_pairs == 0:
-        return 0.0
-    
-    disagreement_rate = 1.0 - (agreements / total_pairs)
-    return disagreement_rate
-
-def calculate_path_distance_approx(gold_structure: Dict, pred_structure: Dict, all_leaves: set) -> float:
-    """Approximate path distance calculation"""
-    if len(all_leaves) < 2:
-        return 0.0
-    
-    # Create simplified distance matrices
-    gold_distances = create_distance_matrix(gold_structure, all_leaves)
-    pred_distances = create_distance_matrix(pred_structure, all_leaves)
-    
-    # Calculate Frobenius norm of difference
-    total_diff = 0.0
-    n_pairs = 0
-    
-    for leaf1 in all_leaves:
-        for leaf2 in all_leaves:
-            if leaf1 != leaf2:
-                gold_dist = gold_distances.get((leaf1, leaf2), 1.0)
-                pred_dist = pred_distances.get((leaf1, leaf2), 1.0)
-                total_diff += (gold_dist - pred_dist) ** 2
-                n_pairs += 1
-    
-    if n_pairs == 0:
-        return 0.0
-    
-    return (total_diff / n_pairs) ** 0.5
-
-def create_distance_matrix(tree_structure: Dict, all_leaves: set) -> Dict:
-    """Create a simplified distance matrix based on cluster membership"""
-    distances = {}
-    
-    # Create cluster membership matrix
-    leaf_clusters = {}
-    for leaf in all_leaves:
-        leaf_clusters[leaf] = set()
-    
-    for i, cluster in enumerate(tree_structure['clusters']):
-        for leaf in cluster:
-            if leaf in leaf_clusters:
-                leaf_clusters[leaf].add(i)
-    
-    # Calculate distances based on shared cluster membership
-    for leaf1 in all_leaves:
-        for leaf2 in all_leaves:
-            if leaf1 == leaf2:
-                distances[(leaf1, leaf2)] = 0.0
-            else:
-                # Distance based on number of shared clusters
-                shared_clusters = len(leaf_clusters[leaf1] & leaf_clusters[leaf2])
-                total_clusters = len(leaf_clusters[leaf1] | leaf_clusters[leaf2])
+            for child in adj[node_id]:
+                leaves.update(get_leaves_under_node(child, new_path))
+            return leaves
+        
+        # For each internal node, create a split
+        for node_id in adj:
+            if node_id not in visited:
+                leaves_under = get_leaves_under_node(node_id)
+                visited.add(node_id)
                 
-                if total_clusters == 0:
-                    distances[(leaf1, leaf2)] = 1.0
-                else:
-                    # Higher shared clusters = lower distance
-                    distances[(leaf1, leaf2)] = 1.0 - (shared_clusters / total_clusters)
+                if len(leaves_under) > 1 and len(leaves_under) < n_leaves:
+                    # Create bipartition
+                    split = frozenset(leaves_under)
+                    splits.add(split)
+        
+        return splits
     
-    return distances
+    def get_k_subsets(splits: Set[frozenset], k: int) -> Set[frozenset]:
+        """Get all k-subsets from splits."""
+        k_subsets = set()
+        for split in splits:
+            if len(split) >= k:
+                for subset in combinations(split, k):
+                    k_subsets.add(frozenset(subset))
+        return k_subsets
+    
+    # Get splits for both trees
+    splits1 = get_all_splits(tree1_adj, n_leaves)
+    splits2 = get_all_splits(tree2_adj, n_leaves)
+    
+    # Get k-subsets
+    k_subsets1 = get_k_subsets(splits1, k)
+    k_subsets2 = get_k_subsets(splits2, k)
+    
+    # Calculate Jaccard distance
+    intersection = len(k_subsets1 & k_subsets2)
+    union = len(k_subsets1 | k_subsets2)
+    
+    if union == 0:
+        return 0.0
+    
+    jaccard_similarity = intersection / union
+    jrf_distance = 1.0 - jaccard_similarity
+    
+    return jrf_distance
 
-def extract_leaves_from_newick(newick: str) -> List[str]:
-    """Extract leaf names from Newick format string"""
-    import re
-    # Remove everything except leaf names
-    # This is a simplified parser - for production use a proper phylogenetic library
-    newick = newick.replace(';', '').replace('(', '').replace(')', '')
-    leaves = [leaf.strip() for leaf in newick.split(',') if leaf.strip()]
-    return leaves
 
-# --------------------------------------------------------------------------- #
-# Embedding utility                                                           #
-# --------------------------------------------------------------------------- #
-
-def _encode_sentences(
-    sentences: Sequence[str],
-    model_type: str,
-    method: str,
-    layer: str | int,
-    device: str,
-) -> tuple[np.ndarray, Sequence[int]]:
-    """Embed sentences and return (embeddings, target_layers)"""
+def build_predicted_tree(entity_names: List[str], 
+                        model_type: str = "gpt2", 
+                        method: str = "last_token",
+                        layer: int = 0,
+                        device: str = "cuda",
+                        template_name: str = "entity_only") -> Tuple[Dict[int, List[int]], Dict[int, float]]:
+    """
+    Build predicted tree using the same approach as visualize_tree.py.
+    
+    Returns:
+        - adjacency dict
+        - birth_time dict
+    """
+    # Apply template to entity names
+    template_str = template.get_template(template_name)
+    templated_texts = []
+    for entity_name in entity_names:
+        templated_text = template.apply_template(template_str, entity_name)
+        templated_texts.append(templated_text)
+    
+    # Get embeddings
     cfg = EmbeddingConfig(
         model_type=model_type,
         method=method,
         layer=layer,
         device=device,
+        verbose=False,
     )
     embedder = EmbeddingModel(cfg)
-    embs = embedder.encode(list(sentences))
-
-    want_all = isinstance(layer, str) and layer.lower() == "all"
-
-    if want_all:
-        if embs.ndim == 3:  # (L,N,D)
-            target_layers: Sequence[int] = range(embs.shape[0])
-        elif embs.ndim == 2:  # (N,D)
-            embs = embs[None]  # → (1,N,D)
-            target_layers = [0]
-        else:
-            raise ValueError(f"Unexpected embedding shape {embs.shape}")
-    else:
-        if embs.ndim == 2:
-            embs = embs[None]
-        target_layers = [int(layer)]
-
-    return embs, target_layers
-
-# --------------------------------------------------------------------------- #
-# Main                                                                        #
-# --------------------------------------------------------------------------- #
-
-def run(args) -> None:
-    # Check R availability and warn user
-    if not HAS_R:
-        print("WARNING: rpy2 not available. Falling back to simplified Python calculations.")
-        print("For accurate TreeDist metrics, please install R with:")
-        print("  sudo apt install r-base r-base-dev")
-        print("  R -e \"install.packages(c('ape', 'TreeDist'))\"")
-        print("  pip install rpy2")
-        print("")
+    embs = embedder.encode(templated_texts, entity_names)
     
-    # 1) Parse gold tree
-    print("Parsing gold tree...")
-    try:
-        gold_tree = build_gold_tree_from_jsonl(args.input)
-        print(f"Gold tree root: {gold_tree.name}")
-        
-        # Debug: Check tree structure
-        def count_nodes(node, depth=0):
-            if depth > 10:
-                return 1
-            count = 1
-            for child in node.children:
-                count += count_nodes(child, depth + 1)
-            return count
-        
-        total_nodes = count_nodes(gold_tree)
-        print(f"Total nodes in gold tree: {total_nodes}")
-        
-        gold_newick = tree_to_newick(gold_tree)
-        print(f"Gold tree Newick length: {len(gold_newick)}")
-        print(f"Gold tree Newick preview: {gold_newick[:200]}...")
-        
-    except Exception as e:
-        print(f"Error parsing gold tree: {e}")
-        print("Creating fallback gold tree...")
-        # Create a simple fallback tree
-        root = TreeNode("Person", False)
-        categories = ["Politician", "Actor", "Athlete", "Musician", "Scientist", "Business_Person"]
-        for cat_name in categories:
-            cat_node = TreeNode(cat_name, False)
-            root.add_child(cat_node)
-            # Add some dummy entities
-            for i in range(3):
-                entity = TreeNode(f"{cat_name}_Entity_{i}", True)
-                cat_node.add_child(entity)
-        gold_tree = root
-        gold_newick = tree_to_newick(gold_tree)
+    if embs.ndim == 3:  # (L, N, D)
+        embs = embs[0]  # Take first layer
+    
+    # Build hierarchy
+    hierarchy = HierarchyNode(embs)
+    hierarchy.calculate_persistence()
+    
+    return hierarchy.h_nodes_adj, hierarchy.birth_time
 
-    # 2) Load & preprocess sentences
+
+
+def export_tree_visualization(adjacency: Dict[int, List[int]], 
+                            birth_time: Dict[int, float],
+                            entity_names: List[str],
+                            profession_map: Dict[str, str],
+                            output_path: Path,
+                            title: str,
+                            is_gold_tree: bool = False,
+                            gold_node_labels: Dict[int, str] = None,
+                            group_spacing_multiplier: float = 10.0,
+                            sibling_spacing_multiplier: float = 0.8):
+    """Export tree visualization to HTML."""
+    n_leaves = len(entity_names)
+    
+    # Get colors
+    node_colors = {}
+    for idx, entity_name in enumerate(entity_names):
+        profession = profession_map.get(entity_name, "Person")
+        node_colors[idx] = PROFESSION_COLORS.get(profession, "#CCCCCC")
+    
+    # Create labels
+    if is_gold_tree and gold_node_labels:
+        labels = gold_node_labels
+    else:
+        labels = {idx: entity_name for idx, entity_name in enumerate(entity_names)}
+    
+    if is_gold_tree:
+        # Use multi-branch tree encoder for gold tree
+        tree_encoder = MultiBranchTreeEncoding(
+            adjacency=adjacency,
+            births=birth_time,
+            n_leaves=n_leaves,
+            n_nodes=max(adjacency.keys()) + 1 if adjacency else n_leaves,
+            highlights=None,
+            labels=labels,
+            node_colors=node_colors,
+            title=title,
+            height_px=1000,
+            width_pct=100,
+            font_size=16,
+            group_spacing_multiplier=group_spacing_multiplier,
+            sibling_spacing_multiplier=sibling_spacing_multiplier
+        )
+    else:
+        # Use binary tree encoder for predicted tree
+        # Convert adjacency to binary format for TreeEncoding
+        binary_adj = {}
+        for parent, children in adjacency.items():
+            if len(children) == 2:
+                binary_adj[parent] = tuple(children)
+            # Skip non-binary nodes (shouldn't happen for predicted trees)
+        
+        tree_encoder = TreeEncoding(
+            adjacency=binary_adj,
+            births=birth_time,
+            n_leaves=n_leaves,
+            n_nodes=max(adjacency.keys()) + 1 if adjacency else n_leaves,
+            highlights=None,
+            labels=labels,
+            node_colors=node_colors,
+            title=title,
+            height_px=1000,
+            width_pct=100,
+            font_size=16
+        )
+    
+    tree_encoder.draw(str(output_path))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate tree distance between gold and predicted trees")
+    parser.add_argument("--input", required=True, help="Input JSONL file (gold tree)")
+    parser.add_argument("--output_dir", required=True, help="Output directory for results and visualizations")
+    
+    # Prediction model parameters
+    parser.add_argument("--model", choices=["gpt2", "meta-llama/Meta-Llama-3-8B", "fasttext", "random_emb"], 
+                       default="gpt2", help="Model for prediction")
+    parser.add_argument("--method", choices=["average", "last_token"], default="last_token")
+    parser.add_argument("--layer", type=int, default=0, help="Layer index for embeddings")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--template", default="entity_only", help="Template for text generation")
+    
+    # Export options
+    parser.add_argument("--export_visualizations", action="store_true", 
+                       help="Export HTML visualizations of both trees")
+    
+    # Visualization spacing parameters
+    parser.add_argument("--group_spacing_multiplier", type=float, default=10.0,
+                       help="Multiplier for spacing between different category groups (default: 10.0)")
+    parser.add_argument("--sibling_spacing_multiplier", type=float, default=0.8,
+                       help="Multiplier for spacing between sibling nodes within same group (default: 0.8)")
+    
+    args = parser.parse_args()
+    
+    # Load data
     input_path = Path(args.input)
     df = pd.read_json(str(input_path), lines=True)
-    df = df[df["is_entity"] == True]
-    sentences = df["wiki_title"].fillna("").tolist()
     
-    # Ensure sentence names match gold tree leaves
-    gold_leaves = set()
-    try:
-        gold_leaves = set(gold_tree.get_leaves())
-    except:
-        # Fallback leaf collection
-        gold_leaves = set(collect_leaf_nodes_safe(gold_tree))
+    print(f"Loaded {len(df)} records from {input_path}")
     
-    sentence_names = [s.replace(' ', '_').replace('(', '').replace(')', '').replace(',', '').replace(';', '').replace(':', '') for s in sentences]
+    # Build gold tree
+    print("Building gold tree...")
+    category_to_entities, entity_names, profession_map = build_gold_tree(df)
+    gold_adjacency, gold_node_labels = reconstruct_entity_tree_adjacency(df, entity_names)
     
-    print(f"Found {len(sentences)} entity sentences")
-    print(f"Gold tree has {len(gold_leaves)} leaves")
-    print(f"Sample sentences: {sentences[:5]}")
-
-    # 3) Embed sentences
-    print("Computing embeddings...")
-    all_embs, target_layers = _encode_sentences(
-        sentences=sentences,
+    print(f"Gold tree: {len(entity_names)} entities, {len(gold_adjacency)} internal nodes")
+    
+    # Build predicted tree
+    print("Building predicted tree...")
+    pred_adjacency, pred_birth_time = build_predicted_tree(
+        entity_names=entity_names,
         model_type=args.model,
         method=args.method,
         layer=args.layer,
         device=args.device,
+        template_name=args.template
     )
-
-    # 4) Evaluate each layer
-    results = []
     
-    for out_idx, l_idx in enumerate(target_layers):
-        print(f"Evaluating layer {l_idx}...")
-        
-        embs = all_embs[out_idx]  # (N, D)
-
-        # Build predicted hierarchy
-        hierarchy = HierarchyNode(embs)
-        hierarchy.calculate_persistence()
-        adjacency = hierarchy.h_nodes_adj
-        n_leaves = int(np.min(list(adjacency.keys())))
-        n_nodes = int(np.max(list(adjacency.keys())) + 1)
-
-        print(f"Predicted hierarchy: {n_leaves} leaves, {n_nodes} total nodes")
-
-        # Convert to tree structure
-        pred_tree = hierarchy_to_tree(adjacency, sentence_names, n_leaves)
-        pred_newick = tree_to_newick(pred_tree)
-        
-        print(f"Predicted tree Newick length: {len(pred_newick)}")
-        print(f"Predicted tree Newick preview: {pred_newick[:200]}...")
-
-        # Compute distances
-        distances = compute_tree_distances(gold_newick, pred_newick)
-        
-        # Store results
-        result = {
-            'model': args.model,
-            'method': args.method,
-            'layer': l_idx,
-            'n_leaves': n_leaves,
-            'n_nodes': n_nodes,
-            'r_available': HAS_R,
-            'gold_newick_length': len(gold_newick),
-            'pred_newick_length': len(pred_newick),
-            **distances
-        }
-        results.append(result)
-        
-        print(f"Layer {l_idx} distances: {distances}")
-
-    # 5) Save results
-    results_df = pd.DataFrame(results)
-    output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    results_df.to_csv(output_path, index=False)
+    print(f"Predicted tree: {len(entity_names)} entities, {len(pred_adjacency)} internal nodes")
     
-    print(f"\nResults saved to: {output_path}")
-    print(results_df)
+    # Calculate JRF distances
+    n_leaves = len(entity_names)
+    
+    jrf_k1 = jaccard_robinson_foulds_distance(gold_adjacency, pred_adjacency, n_leaves, k=1)
+    jrf_k2 = jaccard_robinson_foulds_distance(gold_adjacency, pred_adjacency, n_leaves, k=2)
+    
+    # Print results
+    print("\n" + "="*50)
+    print("EVALUATION RESULTS")
+    print("="*50)
+    print(f"Dataset: {input_path.name}")
+    print(f"Model: {args.model} (layer {args.layer})")
+    print(f"Template: {args.template}")
+    print(f"Number of entities: {n_leaves}")
+    print(f"JRF Distance (k=1): {jrf_k1:.4f}")
+    print(f"JRF Distance (k=2): {jrf_k2:.4f}")
+    
+    # Save results
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    results = {
+        "dataset": str(input_path),
+        "model": args.model,
+        "layer": args.layer,
+        "template": args.template,
+        "n_entities": n_leaves,
+        "jrf_k1": jrf_k1,
+        "jrf_k2": jrf_k2,
+        "gold_internal_nodes": len(gold_adjacency),
+        "pred_internal_nodes": len(pred_adjacency)
+    }
+    
+    results_path = output_dir / "evaluation_results.json"
+    with open(results_path, 'w') as f:
+        json.dump(results, f, indent=2)
+    print(f"\nResults saved to: {results_path}")
+    
+    # Export visualizations if requested
+    if args.export_visualizations:
+        print("\nExporting visualizations...")
+        
+        # Gold tree visualization
+        # Create fake birth times for gold tree (based on tree depth)
+        gold_birth_time = {}
+        
+        def assign_birth_times(node_id: int, depth: float = 0.0):
+            gold_birth_time[node_id] = depth
+            if node_id in gold_adjacency:
+                for child in gold_adjacency[node_id]:
+                    assign_birth_times(child, depth + 0.1)
+        
+        # Find root of gold tree (node that is not a child of any other node)
+        all_children = set()
+        for children in gold_adjacency.values():
+            all_children.update(children)
+        
+        gold_root_id = None
+        for node_id in gold_adjacency:
+            if node_id not in all_children:
+                gold_root_id = node_id
+                break
+        
+        if gold_root_id is not None:
+            assign_birth_times(gold_root_id)
+        else:
+            # If no clear root, assign birth times to all nodes
+            for node_id in range(n_leaves):
+                gold_birth_time[node_id] = 0.0
+            for node_id in gold_adjacency:
+                if node_id not in gold_birth_time:
+                    gold_birth_time[node_id] = 0.1
+        
+        gold_viz_path = output_dir / "gold_tree.html"
+        export_tree_visualization(
+            gold_adjacency, gold_birth_time, entity_names, profession_map,
+            gold_viz_path, f"Gold Tree - {input_path.name}", is_gold_tree=True,
+            gold_node_labels=gold_node_labels,
+            group_spacing_multiplier=args.group_spacing_multiplier,
+            sibling_spacing_multiplier=args.sibling_spacing_multiplier
+        )
+        print(f"Gold tree visualization: {gold_viz_path}")
+        
+        # Predicted tree visualization
+        pred_viz_path = output_dir / "predicted_tree.html"
+        export_tree_visualization(
+            pred_adjacency, pred_birth_time, entity_names, profession_map,
+            pred_viz_path, f"Predicted Tree - {args.model} Layer {args.layer}", is_gold_tree=False
+        )
+        print(f"Predicted tree visualization: {pred_viz_path}")
 
-# --------------------------------------------------------------------------- #
-# Entry                                                                       #
-# --------------------------------------------------------------------------- #
 
 if __name__ == "__main__":
-    parser = build_arg_parser()
-    args = parser.parse_args()
-    print("Arguments:")
-    print(json.dumps(vars(args), indent=2, ensure_ascii=False))
-    run(args)
+    main()

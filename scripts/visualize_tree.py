@@ -329,12 +329,12 @@ def run(args) -> None:
         n_nodes = int(np.max(list(adjacency.keys())) + 1)
 
         # Summary extraction (currently unused for highlights)
-        trimming_summary, _, important = summarization.get_hierarchy_summary_ids(embs)
-        kcenter_summary = summarization.get_k_center_summary_ids(
-            summary_length=len(trimming_summary),
-            embs=embs,
-        )
-        highlights = None  # set(trimming_summary) | set(kcenter_summary) | set(important)
+        # trimming_summary, _, important = summarization.get_hierarchy_summary_ids(embs)
+        # kcenter_summary = summarization.get_k_center_summary_ids(
+        #     summary_length=len(trimming_summary),
+        #     embs=embs,
+        # )
+        # highlights = None  # set(trimming_summary) | set(kcenter_summary) | set(important)
 
         # Create title with model, layer, and template info
         if args.model == "random_emb":
@@ -351,7 +351,7 @@ def run(args) -> None:
             births=hierarchy.birth_time,
             n_leaves=n_leaves,
             n_nodes=n_nodes,
-            highlights=highlights,
+            highlights=None,
             labels={idx: entity_name for idx, entity_name in enumerate(entity_names)},  # Show original entity names
             node_colors=node_colors,
             title=title,

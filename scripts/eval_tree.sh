@@ -31,9 +31,9 @@ uv run python3 eval_tree.py \
     --export_visualizations \
     $VERBOSE
 
-####################################
-# FastText
-####################################
+###################################
+FastText
+###################################
 echo "Running FastText..."
 MODEL="fasttext"
 METHOD="average"
@@ -59,7 +59,8 @@ METHOD="last_token"
 TEMPLATES=("entity_only")
 # TEMPLATES=("entity_only" "occupation_question" "gift")
 # Layers to test
-LAYERS=(0 2 4 12)
+LAYERS=(0 2 4 6 12)
+# LAYERS=(0 2 6)
 
 for TEMPLATE in "${TEMPLATES[@]}"; do
     for LAYER in "${LAYERS[@]}"; do
@@ -90,7 +91,8 @@ METHOD="last_token"
 TEMPLATES=("entity_only")
 # TEMPLATES=("entity_only" "occupation_question" "gift")
 # Layers to test (Llama-3-8B has 32 layers)
-LAYERS=(0 2 5 10 15 20 25 32)
+LAYERS=(0 2 6 10 15 20 25 32)
+# LAYERS=(6)
 
 for TEMPLATE in "${TEMPLATES[@]}"; do
     for LAYER in "${LAYERS[@]}"; do

@@ -13,32 +13,32 @@ echo "=========================================="
 echo "Tree Evaluation with Multiple Models"
 echo "=========================================="
 
-####################################
-# Random Embeddings
-####################################
-echo "Running Random Embeddings..."
-MODEL="random_emb"
-RANDOM_DIM=768
-RANDOM_STD=1.0
-RANDOM_SEED=42
-OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}/dim_${RANDOM_DIM}_std_${RANDOM_STD}_seed_${RANDOM_SEED}"
+# ####################################
+# # Random Embeddings
+# ####################################
+# echo "Running Random Embeddings..."
+# MODEL="random_emb"
+# RANDOM_DIM=768
+# RANDOM_STD=1.0
+# RANDOM_SEED=42
+# OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}/dim_${RANDOM_DIM}_std_${RANDOM_STD}_seed_${RANDOM_SEED}"
 
-uv run python3 eval_tree.py \
-    --input ${INPUT} \
-    --output_dir ${OUTPUT_DIR} \
-    --model ${MODEL} \
-    --device ${DEVICE} \
-    --export_visualizations \
-    $VERBOSE
+# uv run python3 eval_tree.py \
+#     --input ${INPUT} \
+#     --output_dir ${OUTPUT_DIR} \
+#     --model ${MODEL} \
+#     --device ${DEVICE} \
+#     --export_visualizations \
+#     $VERBOSE
 
 ###################################
-FastText
+# gold_binary
 ###################################
-echo "Running FastText..."
-MODEL="fasttext"
+echo "Running gold_binary..."
+MODEL="gold_binary_left"
 METHOD="average"
 OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}"
-
+echo "Left-leaning:"
 uv run python3 eval_tree.py \
     --input ${INPUT} \
     --output_dir ${OUTPUT_DIR} \
@@ -48,69 +48,101 @@ uv run python3 eval_tree.py \
     --export_visualizations \
     $VERBOSE
 
-####################################
-# GPT-2 with different layers and templates
-####################################
-echo "Running GPT-2 with different layers and templates..."
-MODEL="gpt2"
-METHOD="last_token"
+MODEL="gold_binary_balanced"
+OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}"
+echo "Balanced:"
+uv run python3 eval_tree.py \
+    --input ${INPUT} \
+    --output_dir ${OUTPUT_DIR} \
+    --model ${MODEL} \
+    --method ${METHOD} \
+    --device ${DEVICE} \
+    --export_visualizations \
+    $VERBOSE
 
-# Templates to test
-TEMPLATES=("entity_only")
-# TEMPLATES=("entity_only" "occupation_question" "gift")
-# Layers to test
-LAYERS=(0 2 4 6 12)
-# LAYERS=(0 2 6)
 
-for TEMPLATE in "${TEMPLATES[@]}"; do
-    for LAYER in "${LAYERS[@]}"; do
-        echo "GPT-2: Template=${TEMPLATE}, Layer=${LAYER}"
-        OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}/template_${TEMPLATE}/layer_${LAYER}"
+
+# ###################################
+# # FastText
+# ###################################
+# echo "Running FastText..."
+# MODEL="fasttext"
+# METHOD="average"
+# OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}"
+
+# uv run python3 eval_tree.py \
+#     --input ${INPUT} \
+#     --output_dir ${OUTPUT_DIR} \
+#     --model ${MODEL} \
+#     --method ${METHOD} \
+#     --device ${DEVICE} \
+#     --export_visualizations \
+#     $VERBOSE
+
+
+# ####################################
+# # GPT-2 with different layers and templates
+# ####################################
+# echo "Running GPT-2 with different layers and templates..."
+# MODEL="gpt2"
+# METHOD="last_token"
+
+# # Templates to test
+# TEMPLATES=("entity_only")
+# # TEMPLATES=("entity_only" "occupation_question" "gift")
+# # Layers to test
+# LAYERS=(0 2 4 6 12)
+# # LAYERS=(0 2 6)
+
+# for TEMPLATE in "${TEMPLATES[@]}"; do
+#     for LAYER in "${LAYERS[@]}"; do
+#         echo "GPT-2: Template=${TEMPLATE}, Layer=${LAYER}"
+#         OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}/template_${TEMPLATE}/layer_${LAYER}"
         
-        uv run python3 eval_tree.py \
-            --input ${INPUT} \
-            --output_dir ${OUTPUT_DIR} \
-            --model ${MODEL} \
-            --method ${METHOD} \
-            --layer ${LAYER} \
-            --device ${DEVICE} \
-            --template ${TEMPLATE} \
-            --export_visualizations \
-            $VERBOSE
-    done
-done
+#         uv run python3 eval_tree.py \
+#             --input ${INPUT} \
+#             --output_dir ${OUTPUT_DIR} \
+#             --model ${MODEL} \
+#             --method ${METHOD} \
+#             --layer ${LAYER} \
+#             --device ${DEVICE} \
+#             --template ${TEMPLATE} \
+#             --export_visualizations \
+#             $VERBOSE
+#     done
+# done
 
-####################################
-# Meta-Llama-3-8B with different layers and templates
-####################################
-echo "Running Meta-Llama-3-8B with different layers and templates..."
-MODEL="meta-llama/Meta-Llama-3-8B"
-METHOD="last_token"
+# ####################################
+# # Meta-Llama-3-8B with different layers and templates
+# ####################################
+# echo "Running Meta-Llama-3-8B with different layers and templates..."
+# MODEL="meta-llama/Meta-Llama-3-8B"
+# METHOD="last_token"
 
-# Templates to test
-TEMPLATES=("entity_only")
-# TEMPLATES=("entity_only" "occupation_question" "gift")
-# Layers to test (Llama-3-8B has 32 layers)
-LAYERS=(0 2 6 10 15 20 25 32)
-# LAYERS=(6)
+# # Templates to test
+# TEMPLATES=("entity_only")
+# # TEMPLATES=("entity_only" "occupation_question" "gift")
+# # Layers to test (Llama-3-8B has 32 layers)
+# LAYERS=(0 2 6 10 15 20 25 32)
+# # LAYERS=(6)
 
-for TEMPLATE in "${TEMPLATES[@]}"; do
-    for LAYER in "${LAYERS[@]}"; do
-        echo "Llama-3-8B: Template=${TEMPLATE}, Layer=${LAYER}"
-        OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}/template_${TEMPLATE}/layer_${LAYER}"
+# for TEMPLATE in "${TEMPLATES[@]}"; do
+#     for LAYER in "${LAYERS[@]}"; do
+#         echo "Llama-3-8B: Template=${TEMPLATE}, Layer=${LAYER}"
+#         OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}/template_${TEMPLATE}/layer_${LAYER}"
         
-        uv run python3 eval_tree.py \
-            --input ${INPUT} \
-            --output_dir ${OUTPUT_DIR} \
-            --model ${MODEL} \
-            --method ${METHOD} \
-            --layer ${LAYER} \
-            --device ${DEVICE} \
-            --template ${TEMPLATE} \
-            --export_visualizations \
-            $VERBOSE
-    done
-done
+#         uv run python3 eval_tree.py \
+#             --input ${INPUT} \
+#             --output_dir ${OUTPUT_DIR} \
+#             --model ${MODEL} \
+#             --method ${METHOD} \
+#             --layer ${LAYER} \
+#             --device ${DEVICE} \
+#             --template ${TEMPLATE} \
+#             --export_visualizations \
+#             $VERBOSE
+#     done
+# done
 
 echo "=========================================="
 echo "All evaluations completed!"

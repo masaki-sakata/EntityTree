@@ -12,6 +12,9 @@ distance (Robinson & Foulds 1981, Pompei et al. 2012).
 2. k=1,2 の両方をサポート
 3. サードパーティ依存: scipy>=1.9 が必要
    $ pip install scipy
+4. Gold Treeの2分岐木変換モデルを2種類追加:
+   - gold_binary_left: 左寄せアルゴリズム
+   - gold_binary_balanced: バランス型アルゴリズム
 """
 
 from __future__ import annotations
@@ -230,7 +233,236 @@ def jaccard_robinson_foulds_distance(
     return 2.0 * (max_pairs - total_sim)
 
 # --------------------------------------------------------------------------- #
-# 3. Predicted tree builder（変更なし）
+# 3. Gold tree binary conversion (two methods)
+# --------------------------------------------------------------------------- #
+def convert_multibranch_to_binary_left(
+        adjacency: Dict[int, List[int]], 
+        n_leaves: int
+) -> Tuple[Dict[int, List[int]], Dict[int, float]]:
+    """
+    Convert a multibranch tree to a left-leaning binary tree.
+    
+    For nodes with >2 children, create intermediate nodes to binarize
+    using left-leaning approach (sequential pairing).
+    Example: parent -> [A, B, C, D] becomes:
+             parent -> [internal1, D]
+             internal1 -> [internal2, C]
+             internal2 -> [A, B]
+    
+    Parameters
+    ----------
+    adjacency : Dict[int, List[int]]
+        Original multibranch adjacency
+    n_leaves : int
+        Number of leaf nodes
+    
+    Returns
+    -------
+    binary_adj : Dict[int, List[int]]
+        Binary tree adjacency
+    birth_time : Dict[int, float]
+        Birth times for nodes (synthetic)
+    """
+    binary_adj = {}
+    next_internal_id = max(max(adjacency.keys(), default=n_leaves-1), 
+                          max((c for cs in adjacency.values() for c in cs), default=n_leaves-1)) + 1
+    
+    # Process each parent node
+    for parent, children in adjacency.items():
+        if len(children) <= 2:
+            # Already binary or unary
+            binary_adj[parent] = children
+        else:
+            # Need to binarize: use left-leaning approach
+            remaining = list(children)
+            current_parent = parent
+            
+            while len(remaining) > 2:
+                # Take first two children
+                left = remaining.pop(0)
+                right = remaining.pop(0)
+                
+                # Create new internal node
+                new_internal = next_internal_id
+                next_internal_id += 1
+                
+                # Connect current parent to new internal and remaining
+                if len(remaining) == 1:
+                    binary_adj[current_parent] = [new_internal, remaining[0]]
+                    binary_adj[new_internal] = [left, right]
+                    remaining = []
+                else:
+                    # More children to process
+                    next_internal = next_internal_id
+                    next_internal_id += 1
+                    binary_adj[current_parent] = [new_internal - 1, next_internal]
+                    binary_adj[new_internal - 1] = [left, right]
+                    current_parent = next_internal
+                    remaining.insert(0, remaining.pop())  # Move last to front for next iteration
+            
+            if len(remaining) == 2:
+                binary_adj[current_parent] = remaining
+    
+    # Create synthetic birth times based on tree depth
+    birth_time = {}
+    
+    def assign_birth_times(node: int, depth: float = 0.0, visited: Set[int] = None):
+        if visited is None:
+            visited = set()
+        if node in visited:
+            return
+        visited.add(node)
+        birth_time[node] = depth
+        for child in binary_adj.get(node, []):
+            assign_birth_times(child, depth + 0.1, visited)
+    
+    # Find roots
+    all_children = {c for cs in binary_adj.values() for c in cs}
+    roots = set(binary_adj.keys()) - all_children
+    
+    # Also check for leaf nodes that might be roots
+    for i in range(n_leaves):
+        if i not in all_children and i not in binary_adj:
+            roots.add(i)
+    
+    for root in roots:
+        assign_birth_times(root)
+    
+    # Ensure all leaf nodes have birth times
+    for i in range(n_leaves):
+        if i not in birth_time:
+            birth_time[i] = 1.0  # Default depth for unconnected leaves
+    
+    return binary_adj, birth_time
+
+
+def convert_multibranch_to_binary_balanced(
+        adjacency: Dict[int, List[int]], 
+        n_leaves: int
+) -> Tuple[Dict[int, List[int]], Dict[int, float]]:
+    """
+    Convert a multibranch tree to a balanced binary tree.
+    
+    For nodes with >2 children, create intermediate nodes to binarize
+    using balanced splitting (divide children list in half recursively).
+    Example: parent -> [A, B, C, D] becomes:
+             parent -> [internal1, internal2]
+             internal1 -> [A, B]
+             internal2 -> [C, D]
+    
+    Parameters
+    ----------
+    adjacency : Dict[int, List[int]]
+        Original multibranch adjacency
+    n_leaves : int
+        Number of leaf nodes
+    
+    Returns
+    -------
+    binary_adj : Dict[int, List[int]]
+        Binary tree adjacency
+    birth_time : Dict[int, float]
+        Birth times for nodes (synthetic)
+    """
+    binary_adj = {}
+    next_internal_id = max(max(adjacency.keys(), default=n_leaves-1), 
+                          max((c for cs in adjacency.values() for c in cs), default=n_leaves-1)) + 1
+    
+    def binarize_children(children: List[int]) -> Tuple[int, Dict[int, List[int]]]:
+        """
+        Recursively binarize a list of children nodes.
+        Returns the root of the binary subtree and updates to adjacency.
+        """
+        nonlocal next_internal_id
+        local_adj = {}
+        
+        if len(children) == 0:
+            return None, {}
+        elif len(children) == 1:
+            return children[0], {}
+        elif len(children) == 2:
+            # Create internal node for two children
+            new_node = next_internal_id
+            next_internal_id += 1
+            local_adj[new_node] = children
+            return new_node, local_adj
+        else:
+            # Split children list in half for balanced tree
+            mid = len(children) // 2
+            left_children = children[:mid]
+            right_children = children[mid:]
+            
+            # Recursively binarize each half
+            left_root, left_adj = binarize_children(left_children)
+            right_root, right_adj = binarize_children(right_children)
+            
+            # Create parent node for the two subtrees
+            new_node = next_internal_id
+            next_internal_id += 1
+            local_adj[new_node] = [left_root, right_root]
+            
+            # Merge adjacencies
+            local_adj.update(left_adj)
+            local_adj.update(right_adj)
+            
+            return new_node, local_adj
+    
+    # Process each parent node
+    for parent, children in adjacency.items():
+        if len(children) == 0:
+            continue
+        elif len(children) == 1:
+            binary_adj[parent] = children
+        elif len(children) == 2:
+            binary_adj[parent] = children
+        else:
+            # Need to binarize: use balanced approach
+            root, sub_adj = binarize_children(children)
+            if root is not None:
+                # Connect original parent to the root of binarized subtree
+                if root in sub_adj:
+                    # root is an internal node, connect parent to its children
+                    binary_adj[parent] = sub_adj[root]
+                    del sub_adj[root]
+                else:
+                    # root is a single child
+                    binary_adj[parent] = [root]
+                binary_adj.update(sub_adj)
+    
+    # Create synthetic birth times based on tree depth
+    birth_time = {}
+    
+    def assign_birth_times(node: int, depth: float = 0.0, visited: Set[int] = None):
+        if visited is None:
+            visited = set()
+        if node in visited:
+            return
+        visited.add(node)
+        birth_time[node] = depth
+        for child in binary_adj.get(node, []):
+            assign_birth_times(child, depth + 0.1, visited)
+    
+    # Find roots
+    all_children = {c for cs in binary_adj.values() for c in cs}
+    roots = set(binary_adj.keys()) - all_children
+    
+    # Also check for leaf nodes that might be roots
+    for i in range(n_leaves):
+        if i not in all_children and i not in binary_adj:
+            roots.add(i)
+    
+    for root in roots:
+        assign_birth_times(root)
+    
+    # Ensure all leaf nodes have birth times
+    for i in range(n_leaves):
+        if i not in birth_time:
+            birth_time[i] = 1.0  # Default depth for unconnected leaves
+    
+    return binary_adj, birth_time
+
+# --------------------------------------------------------------------------- #
+# 4. Predicted tree builder (modified to support gold_binary variants)
 # --------------------------------------------------------------------------- #
 def build_predicted_tree(
         entity_names: List[str],
@@ -238,9 +470,50 @@ def build_predicted_tree(
         method: str = "last_token",
         layer: int = 0,
         device: str = "cuda",
-        template_name: str = "entity_only"
+        template_name: str = "entity_only",
+        gold_adj: Dict[int, List[int]] = None,
+        n_leaves: int = None
 ) -> Tuple[Dict[int, List[int]], Dict[int, float]]:
-    """Build predicted tree using hierarchical clustering persistence."""
+    """
+    Build predicted tree using hierarchical clustering persistence 
+    or gold tree binary conversion.
+    
+    Parameters
+    ----------
+    entity_names : List[str]
+        List of entity names
+    model_type : str
+        Model type (gpt2, llama, fasttext, random_emb, gold_binary_left, gold_binary_balanced)
+    method : str
+        Embedding method
+    layer : int
+        Layer number for transformer models
+    device : str
+        Device for computation
+    template_name : str
+        Template name for text generation
+    gold_adj : Dict[int, List[int]]
+        Gold tree adjacency (required for gold_binary variants)
+    n_leaves : int
+        Number of leaf nodes (required for gold_binary variants)
+    
+    Returns
+    -------
+    adjacency : Dict[int, List[int]]
+        Predicted tree adjacency
+    birth_time : Dict[int, float]
+        Node birth times
+    """
+    if model_type == "gold_binary_left":
+        if gold_adj is None or n_leaves is None:
+            raise ValueError("gold_adj and n_leaves required for gold_binary_left model")
+        return convert_multibranch_to_binary_left(gold_adj, n_leaves)
+    elif model_type == "gold_binary_balanced":
+        if gold_adj is None or n_leaves is None:
+            raise ValueError("gold_adj and n_leaves required for gold_binary_balanced model")
+        return convert_multibranch_to_binary_balanced(gold_adj, n_leaves)
+    
+    # Original implementation for other models
     template_str = template.get_template(template_name)
     texts = [template.apply_template(template_str, n) for n in entity_names]
 
@@ -258,7 +531,7 @@ def build_predicted_tree(
     return hierarchy.h_nodes_adj, hierarchy.birth_time
 
 # --------------------------------------------------------------------------- #
-# 4. Visualization helpers（元コードから変更なし）
+# 5. Visualization helpers（元コードから変更なし）
 # --------------------------------------------------------------------------- #
 def export_tree_visualization(adjacency: Dict[int, List[int]],
                               birth_time: Dict[int, float],
@@ -298,7 +571,7 @@ def export_tree_visualization(adjacency: Dict[int, List[int]],
     enc.draw(str(output_path))
 
 # --------------------------------------------------------------------------- #
-# 5. Main entry
+# 6. Main entry
 # --------------------------------------------------------------------------- #
 def main() -> None:
     ap = argparse.ArgumentParser(
@@ -307,7 +580,8 @@ def main() -> None:
     ap.add_argument("--output_dir", required=True, help="Output dir")
     ap.add_argument("--model", default="gpt2",
                     choices=["gpt2", "meta-llama/Meta-Llama-3-8B",
-                             "fasttext", "random_emb"])
+                             "fasttext", "random_emb", 
+                             "gold_binary_left", "gold_binary_balanced"])
     ap.add_argument("--method", default="last_token",
                     choices=["average", "last_token"])
     ap.add_argument("--layer", type=int, default=0)
@@ -324,13 +598,21 @@ def main() -> None:
     print("Building gold tree …")
     _, entity_names, prof_map = build_gold_tree(df)
     gold_adj, gold_labels = reconstruct_entity_tree_adjacency(df, entity_names)
+    n_leaves = len(entity_names)
 
     print("Building predicted tree …")
-    pred_adj, pred_birth = build_predicted_tree(
-        entity_names, args.model, args.method,
-        args.layer, args.device, args.template)
+    if args.model in ["gold_binary_left", "gold_binary_balanced"]:
+        binary_method = "left-leaning" if args.model == "gold_binary_left" else "balanced"
+        print(f"  Using gold tree binary conversion ({binary_method}) as predicted tree")
+        pred_adj, pred_birth = build_predicted_tree(
+            entity_names, args.model, args.method,
+            args.layer, args.device, args.template,
+            gold_adj=gold_adj, n_leaves=n_leaves)
+    else:
+        pred_adj, pred_birth = build_predicted_tree(
+            entity_names, args.model, args.method,
+            args.layer, args.device, args.template)
 
-    n_leaves = len(entity_names)
     jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
     jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
     # embed()
@@ -344,6 +626,13 @@ def main() -> None:
     print(f"Entities               : {n_leaves}")
     print(f"JRF Distance (k=1)     : {jrf1:.4f}")
     print(f"JRF Distance (k=2)     : {jrf2:.4f}")
+    
+    if args.model in ["gold_binary_left", "gold_binary_balanced"]:
+        print(f"\nGold tree structure:")
+        print(f"  Original internal nodes : {len(gold_adj)}")
+        print(f"  Binary internal nodes   : {len(pred_adj)}")
+        binary_method = "left-leaning" if args.model == "gold_binary_left" else "balanced"
+        print(f"  Binary method           : {binary_method}")
 
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -376,10 +665,19 @@ def main() -> None:
             group_spacing_multiplier=args.group_spacing_multiplier,
             sibling_spacing_multiplier=args.sibling_spacing_multiplier)
 
-        export_tree_visualization(
-            pred_adj, pred_birth, entity_names, prof_map,
-            out_dir / "predicted_tree.html",
-            f"Predicted Tree – {args.model} L{args.layer}")
+        if args.model in ["gold_binary_left", "gold_binary_balanced"]:
+            # For gold_binary variants, visualize as binary tree
+            binary_method = "Left-leaning" if args.model == "gold_binary_left" else "Balanced"
+            export_tree_visualization(
+                pred_adj, pred_birth, entity_names, prof_map,
+                out_dir / "predicted_tree.html",
+                f"Gold Tree ({binary_method} Binary Conversion)",
+                is_gold_tree=False)  # Use binary tree visualization
+        else:
+            export_tree_visualization(
+                pred_adj, pred_birth, entity_names, prof_map,
+                out_dir / "predicted_tree.html",
+                f"Predicted Tree – {args.model} L{args.layer}")
 
         print("Visualizations exported.")
 

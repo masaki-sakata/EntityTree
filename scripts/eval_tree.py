@@ -5,16 +5,6 @@
 """
 Evaluate predicted trees against gold trees using *true* Jaccard-Robinson-Foulds
 distance (Robinson & Foulds 1981, Pompei et al. 2012).
-
-変更点
--------
-1. JRF 距離を split matching + Hungarian 法で正確に実装
-2. k=1,2 の両方をサポート
-3. サードパーティ依存: scipy>=1.9 が必要
-   $ pip install scipy
-4. Gold Treeの2分岐木変換モデルを2種類追加:
-   - gold_binary_left: 左寄せアルゴリズム
-   - gold_binary_balanced: バランス型アルゴリズム
 """
 
 from __future__ import annotations

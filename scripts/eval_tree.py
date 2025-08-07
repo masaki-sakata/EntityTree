@@ -243,11 +243,11 @@ def convert_multibranch_to_binary_left(
     Convert a multibranch tree to a left-leaning binary tree.
     
     For nodes with >2 children, create intermediate nodes to binarize
-    using left-leaning approach (sequential pairing).
+    using left-leaning approach (first child on left, rest on right).
     Example: parent -> [A, B, C, D] becomes:
-             parent -> [internal1, D]
-             internal1 -> [internal2, C]
-             internal2 -> [A, B]
+             parent -> [A, internal1]
+             internal1 -> [B, internal2]
+             internal2 -> [C, D]
     
     Parameters
     ----------
@@ -267,41 +267,61 @@ def convert_multibranch_to_binary_left(
     next_internal_id = max(max(adjacency.keys(), default=n_leaves-1), 
                           max((c for cs in adjacency.values() for c in cs), default=n_leaves-1)) + 1
     
+    def binarize_left_leaning(children: List[int]) -> Tuple[int, Dict[int, List[int]]]:
+        """
+        Convert a list of children to left-leaning binary structure.
+        Returns root of the binary subtree and the adjacency dict.
+        """
+        nonlocal next_internal_id
+        local_adj = {}
+        
+        if len(children) == 0:
+            return None, {}
+        elif len(children) == 1:
+            return children[0], {}
+        elif len(children) == 2:
+            # Create internal node for two children
+            new_node = next_internal_id
+            next_internal_id += 1
+            local_adj[new_node] = children
+            return new_node, local_adj
+        else:
+            # Left-leaning: take first child as left, recursively process rest as right
+            first = children[0]
+            rest = children[1:]
+            
+            # Recursively binarize the rest
+            right_root, right_adj = binarize_left_leaning(rest)
+            
+            # Create parent node
+            new_node = next_internal_id
+            next_internal_id += 1
+            local_adj[new_node] = [first, right_root]
+            local_adj.update(right_adj)
+            
+            return new_node, local_adj
+    
     # Process each parent node
     for parent, children in adjacency.items():
-        if len(children) <= 2:
-            # Already binary or unary
+        if len(children) == 0:
+            continue
+        elif len(children) == 1:
+            binary_adj[parent] = children
+        elif len(children) == 2:
             binary_adj[parent] = children
         else:
             # Need to binarize: use left-leaning approach
-            remaining = list(children)
-            current_parent = parent
-            
-            while len(remaining) > 2:
-                # Take first two children
-                left = remaining.pop(0)
-                right = remaining.pop(0)
-                
-                # Create new internal node
-                new_internal = next_internal_id
-                next_internal_id += 1
-                
-                # Connect current parent to new internal and remaining
-                if len(remaining) == 1:
-                    binary_adj[current_parent] = [new_internal, remaining[0]]
-                    binary_adj[new_internal] = [left, right]
-                    remaining = []
+            root, sub_adj = binarize_left_leaning(children)
+            if root is not None:
+                # Connect original parent to the root of binarized subtree
+                if root in sub_adj:
+                    # root is an internal node, connect parent to its children
+                    binary_adj[parent] = sub_adj[root]
+                    del sub_adj[root]
                 else:
-                    # More children to process
-                    next_internal = next_internal_id
-                    next_internal_id += 1
-                    binary_adj[current_parent] = [new_internal - 1, next_internal]
-                    binary_adj[new_internal - 1] = [left, right]
-                    current_parent = next_internal
-                    remaining.insert(0, remaining.pop())  # Move last to front for next iteration
-            
-            if len(remaining) == 2:
-                binary_adj[current_parent] = remaining
+                    # root is a single child
+                    binary_adj[parent] = [root]
+                binary_adj.update(sub_adj)
     
     # Create synthetic birth times based on tree depth
     birth_time = {}
@@ -472,7 +492,11 @@ def build_predicted_tree(
         device: str = "cuda",
         template_name: str = "entity_only",
         gold_adj: Dict[int, List[int]] = None,
-        n_leaves: int = None
+        n_leaves: int = None,
+        verbose: bool = False,
+        random_dim: int = 768,
+        random_std: float = 1.0,
+        random_seed: int = 42
 ) -> Tuple[Dict[int, List[int]], Dict[int, float]]:
     """
     Build predicted tree using hierarchical clustering persistence 
@@ -517,14 +541,34 @@ def build_predicted_tree(
     template_str = template.get_template(template_name)
     texts = [template.apply_template(template_str, n) for n in entity_names]
 
-    cfg = EmbeddingConfig(model_type=model_type,
-                          method=method,
-                          layer=layer,
-                          device=device,
-                          verbose=False)
-    embs = EmbeddingModel(cfg).encode(texts, entity_names)
-    if embs.ndim == 3:      # (L, N, D)
-        embs = embs[0]
+
+    # Handle random embeddings through EmbeddingModel
+    if model_type == "random_emb":
+        print(f"{random_dim=}, {random_std=}, {random_seed=}")
+        cfg = EmbeddingConfig(
+            model_type=model_type,
+            method=method,
+            layer=0,  # Random embeddings are always single layer (layer 0)
+            device=device,
+            verbose=verbose,
+            random_dim=random_dim,
+            random_std=random_std,
+            random_seed=random_seed,
+        )
+        embedder = EmbeddingModel(cfg)
+        embs = embedder.encode(texts, list(entity_names))
+        if embs.ndim == 3: 
+            embs = embs[0]  
+        
+    else:
+        cfg = EmbeddingConfig(model_type=model_type,
+                            method=method,
+                            layer=layer,
+                            device=device,
+                            verbose=verbose)
+        embs = EmbeddingModel(cfg).encode(texts, entity_names)
+        if embs.ndim == 3:      # (L, N, D)
+            embs = embs[0]
 
     hierarchy = HierarchyNode(embs)
     hierarchy.calculate_persistence()
@@ -590,6 +634,14 @@ def main() -> None:
     ap.add_argument("--export_visualizations", action="store_true")
     ap.add_argument("--group_spacing_multiplier", type=float, default=10.0)
     ap.add_argument("--sibling_spacing_multiplier", type=float, default=0.8)
+    ap.add_argument("--verbose", action="store_true",
+                    help="Enable verbose output for debugging")
+    ap.add_argument("--random_dim", type=int, default=768,
+                    help="Dimension for random embeddings (default: 768)")
+    ap.add_argument("--random_std", type=float, default=1.0,
+                    help="Standard deviation for random embeddings (default: 1.0)")
+    ap.add_argument("--random_seed", type=int, default=42,
+                    help="Random seed for reproducibility (default: 42)")
     args = ap.parse_args()
 
     df = pd.read_json(args.input, lines=True)
@@ -608,13 +660,46 @@ def main() -> None:
             entity_names, args.model, args.method,
             args.layer, args.device, args.template,
             gold_adj=gold_adj, n_leaves=n_leaves)
+        
+        # Debug: Print some statistics
+        print(f"\nDebug Info:")
+        print(f"  Gold adjacency size: {len(gold_adj)}")
+        print(f"  Predicted adjacency size: {len(pred_adj)}")
+        
+        # Check a sample of the structure
+        gold_sample = list(gold_adj.items())[:3]
+        pred_sample = list(pred_adj.items())[:3]
+        print(f"  Gold sample: {gold_sample}")
+        print(f"  Pred sample: {pred_sample}")
+        
+        # Count children distribution
+        gold_children_counts = {}
+        pred_children_counts = {}
+        for p, cs in gold_adj.items():
+            count = len(cs)
+            gold_children_counts[count] = gold_children_counts.get(count, 0) + 1
+        for p, cs in pred_adj.items():
+            count = len(cs)
+            pred_children_counts[count] = pred_children_counts.get(count, 0) + 1
+        print(f"  Gold children distribution: {gold_children_counts}")
+        print(f"  Pred children distribution: {pred_children_counts}")
     else:
         pred_adj, pred_birth = build_predicted_tree(
             entity_names, args.model, args.method,
-            args.layer, args.device, args.template)
+            args.layer, args.device, args.template, 
+            verbose=args.verbose, random_dim=args.random_dim,
+            random_std=args.random_std, random_seed=args.random_seed)
 
     jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
     jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
+    
+    # Debug: Show splits count
+    splits1 = _collect_splits(gold_adj, n_leaves)
+    splits2 = _collect_splits(pred_adj, n_leaves)
+    print(f"\nSplits Info:")
+    print(f"  Gold splits: {len(splits1)}")
+    print(f"  Pred splits: {len(splits2)}")
+    
     # embed()
 
     print("\n" + "=" * 60)
@@ -680,6 +765,15 @@ def main() -> None:
                 f"Predicted Tree – {args.model} L{args.layer}")
 
         print("Visualizations exported.")
+
+        # --- Quick sanity-check -----------------------------------------
+        # gold_adj, pred_adj は直前で計算済み。left / balanced も同様に取得したい場合は
+        splits_gold = _collect_splits(gold_adj, n_leaves)
+        splits_pred = _collect_splits(pred_adj, n_leaves)
+        print(f"[DEBUG] #splits gold     : {len(splits_gold)}")
+        print(f"[DEBUG] #splits predicted: {len(splits_pred)}")
+        # ---------------------------------------------------------------
+
 
 if __name__ == "__main__":
     main()

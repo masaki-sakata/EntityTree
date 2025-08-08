@@ -16,6 +16,8 @@ from typing import Dict, Set, List, Tuple, Optional
 import pandas as pd
 import numpy as np
 from itertools import combinations
+from math import comb  
+
 
 # --- New dependency ---------------------------------------------------------
 from scipy.optimize import linear_sum_assignment  # <-- add
@@ -221,6 +223,156 @@ def jaccard_robinson_foulds_distance(
     max_pairs = size                       # = max(m, n)
     # JRF distance = 2 * (max_pairs − Σ similarity)
     return 2.0 * (max_pairs - total_sim)
+
+# --------------------------------------------------------------------------- #
+# 2.5. Quartet distance (supports multifurcating gold; pred is binary)
+# --------------------------------------------------------------------------- #
+def _compute_leaf_sets(adjacency: Dict[int, List[int]], n_leaves: int) -> Dict[int, Set[int]]:
+    """
+    Compute and memoize the leaf set under each node.
+    Leaves are [0 .. n_leaves-1]. Non-listed nodes simply have empty children.
+    """
+    memo: Dict[int, Set[int]] = {}
+
+    # Collect all nodes that appear anywhere
+    nodes = set(adjacency.keys()) | {c for cs in adjacency.values() for c in cs} | set(range(n_leaves))
+
+    def dfs(u: int) -> Set[int]:
+        if u in memo:
+            return memo[u]
+        if u < n_leaves:
+            memo[u] = {u}
+            return memo[u]
+        s: Set[int] = set()
+        for v in adjacency.get(u, []):
+            s |= dfs(v)
+        memo[u] = s
+        return s
+
+    for node in nodes:
+        dfs(node)
+    return memo
+
+
+def _split_quartet_counts(adjacency: Dict[int, List[int]], n_leaves: int
+                          ) -> Tuple[Dict[frozenset, int], int]:
+    """
+    For each edge-split (parent -> child), compute how many resolved quartets
+    that split contributes: C(k,2) * C(n-k,2), where k is the smaller side size.
+    Returns (map from normalized split -> quartet_count, total_resolved_quartets).
+    Note: normalization uses the smaller side as the representative.
+    """
+    if n_leaves < 4:
+        return {}, 0
+
+    leaf_sets = _compute_leaf_sets(adjacency, n_leaves)
+    split_to_q = {}
+    total_resolved = 0
+    universe = set(range(n_leaves))
+
+    for parent, children in adjacency.items():
+        for ch in children:
+            subset = leaf_sets.get(ch, set())
+            k = len(subset)
+            if 0 < k < n_leaves:
+                # normalize by smaller side to identify complements
+                if k <= n_leaves - k:
+                    rep = frozenset(subset)
+                    kk = k
+                else:
+                    rep = frozenset(universe - subset)
+                    kk = n_leaves - k
+
+                # quartet contribution for this split
+                q = comb(kk, 2) * comb(n_leaves - kk, 2)
+                if q <= 0:
+                    continue
+                split_to_q[rep] = split_to_q.get(rep, 0) + q
+                total_resolved += q
+
+    return split_to_q, total_resolved
+
+
+def quartet_distance(
+    tree_gold: Dict[int, List[int]],
+    tree_pred: Dict[int, List[int]],
+    n_leaves: int,
+    normalize: bool = True
+) -> Tuple[float, int, int, int]:
+    """
+    Standard quartet distance between a (possibly multifurcating) gold tree
+    and a binary predicted tree.
+
+    Definitions used here:
+      - QD counts a quartet as mismatched if the two induced topologies differ.
+        If gold is unresolved (star) while pred is resolved, this counts as a
+        mismatch (distance 1). This is the usual definition for binary-vs-nonbinary.
+      - Because pred is binary, there are no quartets "shared-unresolved".
+
+    Returns
+    -------
+    (qd, total_quartets, gold_resolved, pred_resolved)
+      qd : normalized if normalize=True (i.e., divided by C(n,4)), else raw count
+      total_quartets : C(n,4)
+      gold_resolved  : number of resolved quartets in gold
+      pred_resolved  : number of resolved quartets in pred (== C(n,4) if truly binary)
+    """
+    if n_leaves < 4:
+        return 0.0, 0, 0, 0
+
+    total_quartets = comb(n_leaves, 4)
+
+    Sg, Rg = _split_quartet_counts(tree_gold, n_leaves)
+    Sp, Rp = _split_quartet_counts(tree_pred, n_leaves)
+
+    # shared resolved quartets are those arising from common splits
+    shared = 0
+    for rep, qg in Sg.items():
+        if rep in Sp:
+            shared += min(qg, Sp[rep])  # should be equal, but min() guards against dup edges
+
+    # With pred binary, distance = total_quartets - shared_resolved
+    qd_raw = total_quartets - shared
+    qd = qd_raw / total_quartets if normalize and total_quartets > 0 else float(qd_raw)
+    return qd, total_quartets, Rg, Rp
+
+
+def generalized_quartet_distance(
+    tree_gold: Dict[int, List[int]],
+    tree_pred: Dict[int, List[int]],
+    n_leaves: int
+) -> Tuple[float, int, int, int, int]:
+    """
+    Generalized Quartet Distance (GQD) w.r.t. a possibly multifurcating gold tree.
+
+    Intuition (common in phylo eval):
+      - Only quartets that are resolved in the GOLD tree are evaluated.
+      - GQD = (resolved_in_gold but *not* matched by pred) / (resolved_in_gold)
+            = 1 - (shared_resolved / resolved_in_gold)
+
+    Returns
+    -------
+    (gqd, resolved_in_gold, resolved_in_pred, shared_resolved, total_quartets)
+    """
+    if n_leaves < 4:
+        return 0.0, 0, 0, 0, 0
+
+    Sg, Rg = _split_quartet_counts(tree_gold, n_leaves)
+    Sp, Rp = _split_quartet_counts(tree_pred, n_leaves)
+    total_quartets = comb(n_leaves, 4)
+
+    shared = 0
+    for rep, qg in Sg.items():
+        if rep in Sp:
+            shared += min(qg, Sp[rep])
+
+    if Rg == 0:
+        # Gold has no resolved quartets (completely star-like) -> define GQD=0.0.
+        return 0.0, Rg, Rp, shared, total_quartets
+
+    gqd = 1.0 - (shared / Rg)
+    return gqd, Rg, Rp, shared, total_quartets
+
 
 # --------------------------------------------------------------------------- #
 # 3. Gold tree binary conversion (two methods)
@@ -682,7 +834,21 @@ def main() -> None:
 
     jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
     jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
-    
+
+    # --- Quartet metrics ----------------------------------------------------
+    qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
+        gold_adj, pred_adj, n_leaves, normalize=True
+    )
+    qd_raw, _, _, _ = quartet_distance(
+        gold_adj, pred_adj, n_leaves, normalize=False
+    )
+
+    gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
+        gold_adj, pred_adj, n_leaves
+    )
+
+
+
     # Debug: Show splits count
     splits1 = _collect_splits(gold_adj, n_leaves)
     splits2 = _collect_splits(pred_adj, n_leaves)
@@ -701,6 +867,11 @@ def main() -> None:
     print(f"Entities               : {n_leaves}")
     print(f"JRF Distance (k=1)     : {jrf1:.4f}")
     print(f"JRF Distance (k=2)     : {jrf2:.4f}")
+    print(f"Quartet Distance (raw) : {qd_raw}")
+    print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
+    print(f"GQD (gold reference)   : {gqd:.6f}")
+    print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared if 'g_shared' in locals() else 0)}")
+
     
     if args.model in ["gold_binary_left", "gold_binary_balanced"]:
         print(f"\nGold tree structure:")
@@ -714,6 +885,12 @@ def main() -> None:
     results = dict(dataset=str(args.input), model=args.model, layer=args.layer,
                    template=args.template, n_entities=n_leaves,
                    jrf_k1=jrf1, jrf_k2=jrf2,
+                   qd_raw=int(qd_raw),
+                   qd_norm=float(qd_norm),
+                   gqd=float(gqd),
+                   quartets_total=int(q_total),
+                   quartets_gold_resolved=int(q_gold_resolved),
+                   quartets_pred_resolved=int(q_pred_resolved),
                    gold_internal_nodes=len(gold_adj),
                    pred_internal_nodes=len(pred_adj))
     with open(out_dir / "evaluation_results.json", "w") as f:
@@ -755,15 +932,6 @@ def main() -> None:
                 f"Predicted Tree – {args.model} L{args.layer}")
 
         print("Visualizations exported.")
-
-        # --- Quick sanity-check -----------------------------------------
-        # gold_adj, pred_adj は直前で計算済み。left / balanced も同様に取得したい場合は
-        splits_gold = _collect_splits(gold_adj, n_leaves)
-        splits_pred = _collect_splits(pred_adj, n_leaves)
-        print(f"[DEBUG] #splits gold     : {len(splits_gold)}")
-        print(f"[DEBUG] #splits predicted: {len(splits_pred)}")
-        # ---------------------------------------------------------------
-
 
 if __name__ == "__main__":
     main()

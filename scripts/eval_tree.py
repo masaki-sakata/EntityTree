@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Set, List, Tuple, Optional
+from typing import Dict, Set, List, Tuple, Optional, Union
 import pandas as pd
 import numpy as np
 from itertools import combinations
@@ -630,7 +630,7 @@ def build_predicted_tree(
         entity_names: List[str],
         model_type: str = "gpt2",
         method: str = "last_token",
-        layer: int = 0,
+        layer: Union[int, str] = 0,
         device: str = "cuda",
         template_name: str = "entity_only",
         gold_adj: Dict[int, List[int]] = None,
@@ -639,7 +639,10 @@ def build_predicted_tree(
         random_dim: int = 768,
         random_std: float = 1.0,
         random_seed: int = 42
-) -> Tuple[Dict[int, List[int]], Dict[int, float]]:
+) -> Union[
+    Tuple[Dict[int, List[int]], Dict[int, float]],
+    Dict[int, Tuple[Dict[int, List[int]], Dict[int, float]]]
+]:
     """
     Build predicted tree using hierarchical clustering persistence 
     or gold tree binary conversion.
@@ -709,12 +712,25 @@ def build_predicted_tree(
                             device=device,
                             verbose=verbose)
         embs = EmbeddingModel(cfg).encode(texts, entity_names)
-        if embs.ndim == 3:      # (L, N, D)
-            embs = embs[0]
-
-    hierarchy = HierarchyNode(embs)
-    hierarchy.calculate_persistence()
-    return hierarchy.h_nodes_adj, hierarchy.birth_time
+        # If layer=="all", we want all layers at once (L, N, D)
+        if isinstance(layer, str) and layer == "all":
+            assert embs.ndim == 3, "Expected (L, N, D) when layer=='all'."
+            # Build a tree for each layer and return a dict of results.
+            results: Dict[int, Tuple[Dict[int, List[int]], Dict[int, float]]] = {}
+            for li in range(embs.shape[0]):
+                # Build hierarchy from the li-th layer embeddings
+                hierarchy = HierarchyNode(embs[li])
+                hierarchy.calculate_persistence()
+                results[li] = (hierarchy.h_nodes_adj, hierarchy.birth_time)
+            return results
+        else:
+            # Fallback: single-layer path (ensure 2D embeddings)
+            if embs.ndim == 3:
+                # Some encoders might still return (1, N, D). Take the first.
+                embs = embs[0]
+            hierarchy = HierarchyNode(embs)
+            hierarchy.calculate_persistence()
+            return hierarchy.h_nodes_adj, hierarchy.birth_time
 
 # --------------------------------------------------------------------------- #
 # 5. Visualization helpers（元コードから変更なし）
@@ -770,7 +786,8 @@ def main() -> None:
                              "gold_binary_left", "gold_binary_balanced"])
     ap.add_argument("--method", default="last_token",
                     choices=["average", "last_token"])
-    ap.add_argument("--layer", type=int, default=0)
+    ap.add_argument("--layer", default="0",
+                    help="Layer index (int) or 'all' to use all transformer layers.")    
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--template", default="entity_only")
     ap.add_argument("--export_visualizations", action="store_true")
@@ -795,6 +812,15 @@ def main() -> None:
     n_leaves = len(entity_names)
 
     print("Building predicted tree …")
+    # Normalize layer argument: int or "all"
+    if isinstance(args.layer, str) and args.layer.lower() == "all":
+        layer_arg: Union[int, str] = "all"
+    else:
+        try:
+            layer_arg = int(args.layer)
+        except Exception:
+            raise ValueError("--layer must be an integer or 'all'")
+    
     if args.model in ["gold_binary_left", "gold_binary_balanced"]:
         binary_method = "left-leaning" if args.model == "gold_binary_left" else "balanced"
         print(f"  Using gold tree binary conversion ({binary_method}) as predicted tree")
@@ -825,54 +851,77 @@ def main() -> None:
             pred_children_counts[count] = pred_children_counts.get(count, 0) + 1
         print(f"  Gold children distribution: {gold_children_counts}")
         print(f"  Pred children distribution: {pred_children_counts}")
+
     else:
-        pred_adj, pred_birth = build_predicted_tree(
+        pred = build_predicted_tree(
             entity_names, args.model, args.method,
-            args.layer, args.device, args.template, 
+            layer_arg, args.device, args.template, 
             verbose=args.verbose, random_dim=args.random_dim,
             random_std=args.random_std, random_seed=args.random_seed)
 
-    jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
-    jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
+    # Handle evaluation & saving for either a single layer or all layers.
+    def eval_and_save_one(layer_idx: int,
+                          pred_adj: Dict[int, List[int]],
+                          pred_birth: Dict[int, float]) -> None:
+        """Evaluate one layer, print results, and save to disk."""
+        jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
+        jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
+        # Quartet metrics
+        qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
+            gold_adj, pred_adj, n_leaves, normalize=True
+        )
+        qd_raw, _, _, _ = quartet_distance(
+            gold_adj, pred_adj, n_leaves, normalize=False
+        )
+        gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
+            gold_adj, pred_adj, n_leaves
+        )
 
-    # --- Quartet metrics ----------------------------------------------------
-    qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
-        gold_adj, pred_adj, n_leaves, normalize=True
-    )
-    qd_raw, _, _, _ = quartet_distance(
-        gold_adj, pred_adj, n_leaves, normalize=False
-    )
+        # Debug splits summary (optional)
+        splits1 = _collect_splits(gold_adj, n_leaves)
+        splits2 = _collect_splits(pred_adj, n_leaves)
+        print("\n" + "=" * 60)
+        print(f"EVALUATION RESULTS  (Layer {layer_idx})")
+        print("=" * 60)
+        print(f"Dataset                : {Path(args.input).name}")
+        print(f"Model / Layer          : {args.model} / {layer_idx}")
+        print(f"Template               : {args.template}")
+        print(f"Entities               : {n_leaves}")
+        print(f"JRF Distance (k=1)     : {jrf1:.4f}")
+        print(f"JRF Distance (k=2)     : {jrf2:.4f}")
+        print(f"Quartet Distance (raw) : {qd_raw}")
+        print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
+        print(f"GQD (gold reference)   : {gqd:.6f}")
+        print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared)}")
+        print(f"Splits (gold/pred)     : {len(splits1)} / {len(splits2)}")
 
-    gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
-        gold_adj, pred_adj, n_leaves
-    )
+        # Save per-layer results
+        results = dict(dataset=str(args.input), model=args.model, layer=layer_idx,
+                       template=args.template, n_entities=n_leaves,
+                       jrf_k1=jrf1, jrf_k2=jrf2,
+                       qd_raw=int(qd_raw),
+                       qd_norm=float(qd_norm),
+                       gqd=float(gqd),
+                       quartets_total=int(q_total),
+                       quartets_gold_resolved=int(q_gold_resolved),
+                       quartets_pred_resolved=int(q_pred_resolved),
+                       gold_internal_nodes=len(gold_adj),
+                       pred_internal_nodes=len(pred_adj))
+        with open(out_dir / f"evaluation_results_L{layer_idx}.json", "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"Results saved to {out_dir / ('evaluation_results_L'+str(layer_idx)+'.json')}")
 
+        # Optional visualization per layer
+        if args.export_visualizations:
+            export_tree_visualization(
+                pred_adj, pred_birth, entity_names, prof_map,
+                out_dir / f"predicted_tree_L{layer_idx}.html",
+                f"Predicted Tree – {args.model} L{layer_idx}")
+            print(f"Visualization saved to {out_dir / f'predicted_tree_L{layer_idx}.html'}")
 
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Debug: Show splits count
-    splits1 = _collect_splits(gold_adj, n_leaves)
-    splits2 = _collect_splits(pred_adj, n_leaves)
-    print(f"\nSplits Info:")
-    print(f"  Gold splits: {len(splits1)}")
-    print(f"  Pred splits: {len(splits2)}")
-    
-    # embed()
-
-    print("\n" + "=" * 60)
-    print("EVALUATION RESULTS")
-    print("=" * 60)
-    print(f"Dataset                : {Path(args.input).name}")
-    print(f"Model / Layer          : {args.model} / {args.layer}")
-    print(f"Template               : {args.template}")
-    print(f"Entities               : {n_leaves}")
-    print(f"JRF Distance (k=1)     : {jrf1:.4f}")
-    print(f"JRF Distance (k=2)     : {jrf2:.4f}")
-    print(f"Quartet Distance (raw) : {qd_raw}")
-    print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
-    print(f"GQD (gold reference)   : {gqd:.6f}")
-    print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared if 'g_shared' in locals() else 0)}")
-
-    
     if args.model in ["gold_binary_left", "gold_binary_balanced"]:
         print(f"\nGold tree structure:")
         print(f"  Original internal nodes : {len(gold_adj)}")
@@ -880,22 +929,17 @@ def main() -> None:
         binary_method = "left-leaning" if args.model == "gold_binary_left" else "balanced"
         print(f"  Binary method           : {binary_method}")
 
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    results = dict(dataset=str(args.input), model=args.model, layer=args.layer,
-                   template=args.template, n_entities=n_leaves,
-                   jrf_k1=jrf1, jrf_k2=jrf2,
-                   qd_raw=int(qd_raw),
-                   qd_norm=float(qd_norm),
-                   gqd=float(gqd),
-                   quartets_total=int(q_total),
-                   quartets_gold_resolved=int(q_gold_resolved),
-                   quartets_pred_resolved=int(q_pred_resolved),
-                   gold_internal_nodes=len(gold_adj),
-                   pred_internal_nodes=len(pred_adj))
-    with open(out_dir / "evaluation_results.json", "w") as f:
-        json.dump(results, f, indent=2)
-    print(f"\nResults saved to {out_dir/'evaluation_results.json'}")
+        # For gold_binary_* we already computed pred_adj/pred_birth above:
+        eval_and_save_one(layer_idx=0, pred_adj=pred_adj, pred_birth=pred_birth)
+    else:
+        if isinstance(layer_arg, str) and layer_arg == "all":
+            # pred is a dict: layer_idx -> (adj, birth)
+            for li, (p_adj, p_birth) in pred.items():
+                eval_and_save_one(layer_idx=li, pred_adj=p_adj, pred_birth=p_birth)
+        else:
+            # Single layer as before
+            pred_adj, pred_birth = pred
+            eval_and_save_one(layer_idx=int(layer_arg), pred_adj=pred_adj, pred_birth=pred_birth)
 
     if args.export_visualizations:
         print("\nExporting visualizations …")
@@ -926,10 +970,12 @@ def main() -> None:
                 f"Gold Tree ({binary_method} Binary Conversion)",
                 is_gold_tree=False)  # Use binary tree visualization
         else:
-            export_tree_visualization(
-                pred_adj, pred_birth, entity_names, prof_map,
-                out_dir / "predicted_tree.html",
-                f"Predicted Tree – {args.model} L{args.layer}")
+            # When layer=='all', per-layer visualizations are already saved above.
+            if not (isinstance(layer_arg, str) and layer_arg == "all"):
+                export_tree_visualization(
+                    pred_adj, pred_birth, entity_names, prof_map,
+                    out_dir / "predicted_tree.html",
+                    f"Predicted Tree – {args.model} L{layer_arg}")
 
         print("Visualizations exported.")
 

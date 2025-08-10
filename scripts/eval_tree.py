@@ -18,11 +18,10 @@ import numpy as np
 from itertools import combinations
 from math import comb  
 
+from scipy.optimize import linear_sum_assignment
+from scipy.stats import pearsonr
 
-# --- New dependency ---------------------------------------------------------
-from scipy.optimize import linear_sum_assignment  # <-- add
 
-# --- Your project-specific imports (変更なし) -------------------------------
 import util
 from embeddings import EmbeddingConfig, EmbeddingModel
 from hierarchy_node import HierarchyNode
@@ -254,43 +253,78 @@ def _compute_leaf_sets(adjacency: Dict[int, List[int]], n_leaves: int) -> Dict[i
     return memo
 
 
-def _split_quartet_counts(adjacency: Dict[int, List[int]], n_leaves: int
-                          ) -> Tuple[Dict[frozenset, int], int]:
-    """
-    For each edge-split (parent -> child), compute how many resolved quartets
-    that split contributes: C(k,2) * C(n-k,2), where k is the smaller side size.
-    Returns (map from normalized split -> quartet_count, total_resolved_quartets).
-    Note: normalization uses the smaller side as the representative.
-    """
-    if n_leaves < 4:
-        return {}, 0
 
+def _normalize_split_bitset(subset_bits: int, k: int, n_leaves: int) -> int:
+    """
+    無向 split の正規化：小さい側を代表に。k == n-k（真っ二つ）のときは
+    subset/complement のビット表現のうち整数として小さい方を代表にする。
+    """
+    universe = (1 << n_leaves) - 1
+    comp_bits = universe ^ subset_bits
+    if k < (n_leaves - k):
+        return subset_bits
+    if k > (n_leaves - k):
+        return comp_bits
+    # k == n-k（タイ）
+    return min(subset_bits, comp_bits)
+
+
+def _collect_unique_split_bitsets(adjacency: Dict[int, List[int]], n_leaves: int) -> Set[int]:
+    """
+    木のユニークな無向 split をビットセット（int）で収集。
+    各 edge-split（親→子）の子側にある葉集合を取り、小さい側（タイは上記関数）を代表に。
+    """
+    if n_leaves <= 1:
+        return set()
+
+    # 既存の leaf-set メモ化を利用
     leaf_sets = _compute_leaf_sets(adjacency, n_leaves)
-    split_to_q = {}
-    total_resolved = 0
     universe = set(range(n_leaves))
+    splits: Set[int] = set()
+
+    def to_bits(leaves: Set[int]) -> int:
+        b = 0
+        for i in leaves:
+            b |= (1 << i)
+        return b
 
     for parent, children in adjacency.items():
         for ch in children:
             subset = leaf_sets.get(ch, set())
             k = len(subset)
             if 0 < k < n_leaves:
-                # normalize by smaller side to identify complements
-                if k <= n_leaves - k:
-                    rep = frozenset(subset)
-                    kk = k
-                else:
-                    rep = frozenset(universe - subset)
-                    kk = n_leaves - k
+                rep_bits = _normalize_split_bitset(to_bits(subset), k, n_leaves)
+                splits.add(rep_bits)
+    return splits
 
-                # quartet contribution for this split
-                q = comb(kk, 2) * comb(n_leaves - kk, 2)
-                if q <= 0:
-                    continue
-                split_to_q[rep] = split_to_q.get(rep, 0) + q
-                total_resolved += q
 
-    return split_to_q, total_resolved
+def _resolve_quartet_topology(splits: Set[int], n_leaves: int, a: int, b: int, c: int, d: int) -> int:
+    if not splits:
+        return 0
+
+    mask_all = (1 << n_leaves) - 1
+
+    def pair_mask(x: int, y: int) -> int:
+        return (1 << x) | (1 << y)
+
+    ab = pair_mask(a, b); cd = pair_mask(c, d)
+    ac = pair_mask(a, c); bd = pair_mask(b, d)
+    ad = pair_mask(a, d); bc = pair_mask(b, c)
+
+    for s in splits:
+        sc = (~s) & mask_all
+
+        # ab|cd
+        if ((s & ab) == ab and (sc & cd) == cd) or ((s & cd) == cd and (sc & ab) == ab):
+            return 1
+        # ac|bd
+        if ((s & ac) == ac and (sc & bd) == bd) or ((s & bd) == bd and (sc & ac) == ac):
+            return 2
+        # ad|bc
+        if ((s & ad) == ad and (sc & bc) == bc) or ((s & bc) == bc and (sc & ad) == ad):
+            return 3
+
+    return 0
 
 
 def quartet_distance(
@@ -300,41 +334,35 @@ def quartet_distance(
     normalize: bool = True
 ) -> Tuple[float, int, int, int]:
     """
-    Standard quartet distance between a (possibly multifurcating) gold tree
-    and a binary predicted tree.
-
-    Definitions used here:
-      - QD counts a quartet as mismatched if the two induced topologies differ.
-        If gold is unresolved (star) while pred is resolved, this counts as a
-        mismatch (distance 1). This is the usual definition for binary-vs-nonbinary.
-      - Because pred is binary, there are no quartets "shared-unresolved".
-
-    Returns
-    -------
-    (qd, total_quartets, gold_resolved, pred_resolved)
-      qd : normalized if normalize=True (i.e., divided by C(n,4)), else raw count
-      total_quartets : C(n,4)
-      gold_resolved  : number of resolved quartets in gold
-      pred_resolved  : number of resolved quartets in pred (== C(n,4) if truly binary)
+    標準 Quartet Distance（両木のトポロジー一致=0、不一致=1。両方未解像は0にカウント）
+    戻り値: (qd, total_quartets, gold_resolved, pred_resolved)
     """
     if n_leaves < 4:
         return 0.0, 0, 0, 0
 
     total_quartets = comb(n_leaves, 4)
+    Sg = _collect_unique_split_bitsets(tree_gold, n_leaves)
+    Sp = _collect_unique_split_bitsets(tree_pred, n_leaves)
 
-    Sg, Rg = _split_quartet_counts(tree_gold, n_leaves)
-    Sp, Rp = _split_quartet_counts(tree_pred, n_leaves)
+    mismatches = 0
+    gold_resolved = 0
+    pred_resolved = 0
 
-    # shared resolved quartets are those arising from common splits
-    shared = 0
-    for rep, qg in Sg.items():
-        if rep in Sp:
-            shared += min(qg, Sp[rep])  # should be equal, but min() guards against dup edges
+    # 4点組の直接評価
+    for a, b, c, d in combinations(range(n_leaves), 4):
+        tg = _resolve_quartet_topology(Sg, n_leaves, a, b, c, d)
+        tp = _resolve_quartet_topology(Sp, n_leaves, a, b, c, d)
+        if tg != 0:
+            gold_resolved += 1
+        if tp != 0:
+            pred_resolved += 1
+        # 少なくとも片方が解像していて、トポロジーが異なるなら不一致
+        if (tg != 0 or tp != 0) and (tg != tp):
+            mismatches += 1
 
-    # With pred binary, distance = total_quartets - shared_resolved
-    qd_raw = total_quartets - shared
-    qd = qd_raw / total_quartets if normalize and total_quartets > 0 else float(qd_raw)
-    return qd, total_quartets, Rg, Rp
+    qd_raw = mismatches
+    qd = (qd_raw / total_quartets) if normalize else float(qd_raw)
+    return qd, total_quartets, gold_resolved, pred_resolved
 
 
 def generalized_quartet_distance(
@@ -343,35 +371,226 @@ def generalized_quartet_distance(
     n_leaves: int
 ) -> Tuple[float, int, int, int, int]:
     """
-    Generalized Quartet Distance (GQD) w.r.t. a possibly multifurcating gold tree.
-
-    Intuition (common in phylo eval):
-      - Only quartets that are resolved in the GOLD tree are evaluated.
-      - GQD = (resolved_in_gold but *not* matched by pred) / (resolved_in_gold)
-            = 1 - (shared_resolved / resolved_in_gold)
-
-    Returns
-    -------
-    (gqd, resolved_in_gold, resolved_in_pred, shared_resolved, total_quartets)
+    Generalized Quartet Distance（GQD）
+      gold で解像している quartet に限定し、同じトポロジーでないものを分子に。
+      戻り値: (gqd, resolved_in_gold, resolved_in_pred, shared_resolved, total_quartets)
     """
     if n_leaves < 4:
         return 0.0, 0, 0, 0, 0
 
-    Sg, Rg = _split_quartet_counts(tree_gold, n_leaves)
-    Sp, Rp = _split_quartet_counts(tree_pred, n_leaves)
     total_quartets = comb(n_leaves, 4)
+    Sg = _collect_unique_split_bitsets(tree_gold, n_leaves)
+    Sp = _collect_unique_split_bitsets(tree_pred, n_leaves)
 
-    shared = 0
-    for rep, qg in Sg.items():
-        if rep in Sp:
-            shared += min(qg, Sp[rep])
+    Rg = 0     # gold resolved
+    Rp = 0     # pred resolved
+    shared = 0 # 両方解像かつ同じトポロジー
+
+    for a, b, c, d in combinations(range(n_leaves), 4):
+        tg = _resolve_quartet_topology(Sg, n_leaves, a, b, c, d)
+        tp = _resolve_quartet_topology(Sp, n_leaves, a, b, c, d)
+        if tg != 0:
+            Rg += 1
+            if tp != 0:
+                Rp += 1
+                if tg == tp:
+                    shared += 1
+        else:
+            if tp != 0:
+                Rp += 1
 
     if Rg == 0:
-        # Gold has no resolved quartets (completely star-like) -> define GQD=0.0.
+        # 定義上 0 とする（規約）。NaN 回避。
         return 0.0, Rg, Rp, shared, total_quartets
 
     gqd = 1.0 - (shared / Rg)
     return gqd, Rg, Rp, shared, total_quartets
+
+# --------------------------------------------------------------------------- #
+# 2.6. Cophenetic correlation between two trees (topology-based)
+# --------------------------------------------------------------------------- #
+def _build_parent_map(adjacency: Dict[int, List[int]]) -> Dict[int, Optional[int]]:
+    parent: Dict[int, Optional[int]] = {}
+    for p, cs in adjacency.items():
+        parent.setdefault(p, None)
+        for c in cs:
+            parent[c] = p
+    return parent
+
+def _find_roots(adjacency: Dict[int, List[int]], n_leaves: int) -> Set[int]:
+    parents = set(adjacency.keys())
+    children = {c for cs in adjacency.values() for c in cs}
+    roots = parents - children
+    # 孤立葉（どこにも登場しない葉）も root とみなす
+    for i in range(n_leaves):
+        if (i not in parents) and (i not in children):
+            roots.add(i)
+    return roots
+
+def _compute_depth_map(adjacency: Dict[int, List[int]], n_leaves: int
+                       ) -> Tuple[Dict[int, int], Dict[int, Optional[int]], Set[int]]:
+    from collections import deque
+    parent = _build_parent_map(adjacency)
+    roots = _find_roots(adjacency, n_leaves)
+    depth: Dict[int, int] = {}
+    q = deque()
+    for r in roots:
+        q.append((r, 0))
+    while q:
+        u, d = q.popleft()
+        if u in depth:
+            continue
+        depth[u] = d
+        for v in adjacency.get(u, []):
+            q.append((v, d + 1))
+    # 念のため、未到達ノードがあれば0にしておく
+    all_nodes = set(parent.keys()) | {c for cs in adjacency.values() for c in cs} | set(range(n_leaves))
+    for u in all_nodes:
+        depth.setdefault(u, 0)
+        parent.setdefault(u, None)
+    return depth, parent, roots
+
+def _lca(u: int, v: int,
+         parent: Dict[int, Optional[int]],
+         depth: Dict[int, int]) -> Optional[int]:
+    # 深い方を上に引き上げて揃える
+    uu, vv = u, v
+    du, dv = depth.get(uu, 0), depth.get(vv, 0)
+    while du > dv and uu is not None:
+        uu = parent.get(uu, None); du -= 1
+    while dv > du and vv is not None:
+        vv = parent.get(vv, None); dv -= 1
+    # そろえたら同時に遡上
+    while uu != vv:
+        uu = parent.get(uu, None) if uu is not None else None
+        vv = parent.get(vv, None) if vv is not None else None
+        if uu is None and vv is None:
+            return None
+    return uu
+
+def _cophenetic_vector_by_depth(adjacency: Dict[int, List[int]], n_leaves: int) -> np.ndarray:
+    """
+    各葉ペア (i<j) について LCA の“高さ”を並べたベクトルを返す。
+    高さは depth を max_depth から反転した値（root が最大）を使用。
+    異なる root 同士のペアは仮想 super-root（max_height+1）で扱う。
+    """
+    if n_leaves < 2:
+        return np.array([], dtype=float)
+
+    depth, parent, roots = _compute_depth_map(adjacency, n_leaves)
+    max_depth = max(depth.values()) if depth else 0
+    height = {u: (max_depth - d) for u, d in depth.items()}
+    super_h = (max(height.values()) if height else 0) + 1.0
+
+    vals = []
+    for i in range(n_leaves):
+        for j in range(i + 1, n_leaves):
+            anc = _lca(i, j, parent, depth)
+            h = height.get(anc, super_h) if anc is not None else super_h
+            vals.append(float(h))
+    return np.asarray(vals, dtype=float)
+
+def cophenetic_correlation_between_trees(
+    tree1_adj: Dict[int, List[int]],
+    tree2_adj: Dict[int, List[int]],
+    n_leaves: int
+) -> Tuple[float, int, float]:
+    """
+    2つの木のトポロジー由来のコフェネティック距離ベクトル同士の Pearson 相関。
+    戻り値: (相関係数 r, ペア数 m, p値)
+    """
+    v1 = _cophenetic_vector_by_depth(tree1_adj, n_leaves)
+    v2 = _cophenetic_vector_by_depth(tree2_adj, n_leaves)
+    assert v1.shape == v2.shape, "Cophenetic vectors must have the same length."
+    m = int(v1.size)
+
+    # データ点が1以下 or 定数ベクトルは未定義 -> NaN を返す
+    if m < 2:
+        return float("nan"), m, float("nan")
+    if np.allclose(v1, v1.mean()) or np.allclose(v2, v2.mean()):
+        return float("nan"), m, float("nan")
+
+    r, p = pearsonr(v1, v2)
+    return float(r), m, float(p)
+
+
+# --------------------------------------------------------------------------- #
+# 2.7. Ancestor Jaccard (CASet) between two rooted trees
+# --------------------------------------------------------------------------- #
+def _to_bits(indices: Set[int]) -> int:
+    b = 0
+    for i in indices:
+        b |= (1 << i)
+    return b
+
+def _collect_cluster_bitsets(
+    adjacency: Dict[int, List[int]],
+    n_leaves: int,
+    include_super_root: bool = False
+) -> Set[int]:
+    """
+    各内部ノードが抱える葉集合（サイズ>=2）をビット集合(int)で収集。
+    同一の葉集合を作る内部ノードが複数あっても set で一意化される。
+    include_super_root=True の場合は全葉集合も1つだけ追加する。
+    """
+    clusters: Set[int] = set()
+    if n_leaves < 2:
+        return clusters
+
+    leaf_sets = _compute_leaf_sets(adjacency, n_leaves)  # 既存のメモ化関数を利用
+    for node, leaves in leaf_sets.items():
+        if len(leaves) >= 2:
+            clusters.add(_to_bits(leaves))
+    if include_super_root:
+        clusters.add((1 << n_leaves) - 1)
+    return clusters
+
+def caset_ancestor_jaccard(
+    tree1_adj: Dict[int, List[int]],
+    tree2_adj: Dict[int, List[int]],
+    n_leaves: int,
+    include_super_root: bool = True
+) -> Tuple[float, float, int]:
+    """
+    CASet（Ancestor Jaccard）距離と類似度を計算。
+      - 各葉ペア {i,j} について、両木の「{i,j} を含むクラスタ集合」を取り、
+        その Jaccard 類似度の平均を sim、距離を dist=1-sim とする。
+      - 空と空のJaccardは1とみなす（両者が等しいため）。
+      - include_super_root=True なら全葉クラスタを両木に追加（森でも空集合を回避）。
+
+    Returns
+    -------
+    (dist, sim, num_pairs)
+    """
+    m = comb(n_leaves, 2)
+    if m == 0:
+        return 0.0, 1.0, 0
+
+    C1 = _collect_cluster_bitsets(tree1_adj, n_leaves, include_super_root)
+    C2 = _collect_cluster_bitsets(tree2_adj, n_leaves, include_super_root)
+
+    sum_sim = 0.0
+    # 事前に list 化でループ高速化
+    C1_list = list(C1); C2_list = list(C2)
+
+    for i in range(n_leaves):
+        for j in range(i + 1, n_leaves):
+            mask = (1 << i) | (1 << j)
+            S1 = {c for c in C1_list if (c & mask) == mask}
+            S2 = {c for c in C2_list if (c & mask) == mask}
+
+            if not S1 and not S2:
+                sim = 1.0
+            else:
+                inter = len(S1 & S2)
+                union = len(S1) + len(S2) - inter
+                sim = (inter / union) if union > 0 else 1.0
+            sum_sim += sim
+
+    avg_sim = sum_sim / m
+    avg_dist = 1.0 * (1.0 - avg_sim)
+    return avg_dist, avg_sim, m
+
 
 
 # --------------------------------------------------------------------------- #
@@ -702,8 +921,18 @@ def build_predicted_tree(
         )
         embedder = EmbeddingModel(cfg)
         embs = embedder.encode(texts, list(entity_names))
-        if embs.ndim == 3: 
-            embs = embs[0]  
+
+        # ← ここから追加（型の安全化 + 2次元化 + 返却）
+        # PyTorch Tensor の場合は numpy に
+        if hasattr(embs, "detach"):
+            embs = embs.detach().cpu().numpy()
+        # (1, N, D) のような 3 次元なら 2 次元に
+        if getattr(embs, "ndim", None) == 3:
+            embs = embs[0]
+
+        hierarchy = HierarchyNode(embs)
+        hierarchy.calculate_persistence()
+        return hierarchy.h_nodes_adj, hierarchy.birth_time
         
     else:
         cfg = EmbeddingConfig(model_type=model_type,
@@ -876,6 +1105,13 @@ def main() -> None:
         gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
             gold_adj, pred_adj, n_leaves
         )
+        # CASet (Ancestor Jaccard)
+        caset_dist, caset_sim, caset_pairs = caset_ancestor_jaccard(
+            gold_adj, pred_adj, n_leaves, include_super_root=False
+        )
+        coph_r, coph_pairs, coph_p = cophenetic_correlation_between_trees(
+            gold_adj, pred_adj, n_leaves
+        )
 
         # Debug splits summary (optional)
         splits1 = _collect_splits(gold_adj, n_leaves)
@@ -892,6 +1128,8 @@ def main() -> None:
         print(f"Quartet Distance (raw) : {qd_raw}")
         print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
         print(f"GQD (gold reference)   : {gqd:.6f}")
+        print(f"CASet (Ancestor Jaccard) : dist={caset_dist:.6f}, sim={caset_sim:.6f}  (pairs = {caset_pairs})")
+        print(f"Cophenetic correlation  : {coph_r:.6f}  (pairs = {coph_pairs}, p = {coph_p:.3g})")
         print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared)}")
         print(f"Splits (gold/pred)     : {len(splits1)} / {len(splits2)}")
 
@@ -905,6 +1143,12 @@ def main() -> None:
                        quartets_total=int(q_total),
                        quartets_gold_resolved=int(q_gold_resolved),
                        quartets_pred_resolved=int(q_pred_resolved),
+                       caset_distance=float(caset_dist),
+                       caset_similarity=float(caset_sim),
+                       caset_pairs=int(caset_pairs),
+                       cophenetic_corr=float(coph_r),
+                       cophenetic_pairs=int(coph_pairs),
+                       cophenetic_p=float(coph_p),
                        gold_internal_nodes=len(gold_adj),
                        pred_internal_nodes=len(pred_adj))
         with open(out_dir / f"evaluation_results_L{layer_idx}.json", "w") as f:

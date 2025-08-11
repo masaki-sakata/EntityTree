@@ -34,7 +34,7 @@ from transformers import (
 LLAMA_MODEL_ID = "meta-llama/Meta-Llama-3-8B"  # base model (requested)
 GPT2_MODEL_ID = "gpt2"
 MAX_NEW_TOKENS = 16
-TEMPERATURE = 0.5
+TEMPERATURE = 0.1
 DEFAULT_CUDA_DEVICE = 0
 
 # ----------------------------
@@ -116,24 +116,56 @@ SYNONYMS = {
     ],
 }
 
-def normalize_label(text: str) -> Optional[str]:
+def normalize_label(text: str, preferred_lab: Optional[str] = None) -> Optional[str]:
+    """
+    Normalize a free-form text into one of the 6 labels.
+    Priority rule: check the preferred label (e.g., the gold label) first,
+    then fall back to the remaining labels in the original LABELS order.
+
+    Order of checks within each label:
+      1) explicit label name match (word boundary)
+      2) synonym match (word boundary)
+      3) strict head-phrase match (before punctuation)
+
+    Args:
+        text: generated text to be normalized
+        preferred_lab: if provided and valid, this label is checked first
+
+    Returns:
+        One of LABELS or None if no match was found.
+    """
     if not text:
         return None
+
     t = text.strip()
     tl = t.lower()
 
-    for lab in LABELS:
-        if lab.lower() in tl:
+    # Build label checking order: preferred label first, then the rest
+    label_order: List[str] = []
+    if preferred_lab in LABELS:
+        label_order.append(preferred_lab)
+    label_order.extend([lab for lab in LABELS if lab not in label_order])
+
+    # 1) Try explicit label names in the preferred order
+    for lab in label_order:
+        if re.search(rf"\b{re.escape(lab.lower())}\b", tl):
             return lab
-    for lab, vocab in SYNONYMS.items():
-        for v in vocab:
+
+    # 2) Try synonyms in the preferred order
+    for lab in label_order:
+        for v in SYNONYMS.get(lab, []):
             if re.search(rf"\b{re.escape(v)}\b", tl):
                 return lab
-    head = re.split(r"[.,;:\n\r]\s*", t)[0].strip().lower()
-    for lab, vocab in SYNONYMS.items():
-        if any(head == v for v in vocab):
+
+    # 3) Try strict head-phrase match in the preferred order
+    head = re.split(r"[.,;:\n\r!?]\s*", t)[0].strip().lower()
+    for lab in label_order:
+        vocab = SYNONYMS.get(lab, [])
+        if head == lab.lower() or head in vocab:
             return lab
+
     return None
+
 
 # ----------------------------
 # Model loading WITHOUT device_map (manual .to(cuda:N))
@@ -199,9 +231,11 @@ def ask_and_parse(name: str, gold: str, generator, idx: int) -> ModelResult:
         return_full_text=False,
     )
     raw_text = out[0]["generated_text"]
-    pred = normalize_label(raw_text)
+
+    # Pass the gold label as the preferred label so it's checked first
+    pred = normalize_label(raw_text, preferred_lab=gold)
+
     correct = (pred == gold)
-    # ---- DEBUG print with prompt included ----
     print(
         f"-------------------------------------------\n"
         f"[{generator.model.config._name_or_path}] {name}\n"
@@ -213,6 +247,7 @@ def ask_and_parse(name: str, gold: str, generator, idx: int) -> ModelResult:
         model=generator.model.config._name_or_path,
         name=name, gold=gold, prompt=prompt, raw=raw_text, pred=pred, correct=correct
     )
+
 
 # ----------------------------
 # Evaluation loop

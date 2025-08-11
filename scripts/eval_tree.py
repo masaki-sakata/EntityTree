@@ -407,6 +407,122 @@ def generalized_quartet_distance(
     return gqd, Rg, Rp, shared, total_quartets
 
 # --------------------------------------------------------------------------- #
+# 2.55. Triplet distance (rooted; supports multifurcating/forest)
+# --------------------------------------------------------------------------- #
+def _resolve_triplet_topology_by_lca(
+    parent: Dict[int, Optional[int]],
+    depth: Dict[int, int],
+    a: int, b: int, c: int
+) -> int:
+    """
+    三つ組 {a,b,c} のトポロジーを LCA の深さで判定。
+      戻り値: 0 = 未解像（star）, 1 = ab|c, 2 = ac|b, 3 = bc|a
+    """
+    la = _lca(a, b, parent, depth)
+    lb = _lca(a, c, parent, depth)
+    lc = _lca(b, c, parent, depth)
+    # 別コンポーネントなどで LCA が得られない場合は未解像扱い
+    if la is None or lb is None or lc is None:
+        return 0
+
+    dab = depth.get(la, -1)
+    dac = depth.get(lb, -1)
+    dbc = depth.get(lc, -1)
+
+    # 最も深い（=より“近い”共通祖先）ペアが一意に決まるときだけ解像
+    if dab > dac and dab > dbc:
+        return 1  # ab|c
+    if dac > dab and dac > dbc:
+        return 2  # ac|b
+    if dbc > dab and dbc > dac:
+        return 3  # bc|a
+    return 0     # タイ → 未解像
+
+
+def triplet_distance(
+    tree_gold: Dict[int, List[int]],
+    tree_pred: Dict[int, List[int]],
+    n_leaves: int,
+    normalize: bool = True
+) -> Tuple[float, int, int, int]:
+    """
+    標準 Triplet Distance（片方または両方が解像していて、トポロジーが異なる三つ組を数える）
+    戻り値: (td, total_triplets, gold_resolved, pred_resolved)
+    """
+    if n_leaves < 3:
+        return 0.0, 0, 0, 0
+
+    total_triplets = comb(n_leaves, 3)
+
+    depth_g, parent_g, _ = _compute_depth_map(tree_gold, n_leaves)
+    depth_p, parent_p, _ = _compute_depth_map(tree_pred, n_leaves)
+
+    mismatches = 0
+    gold_resolved = 0
+    pred_resolved = 0
+
+    for a, b, c in combinations(range(n_leaves), 3):
+        tg = _resolve_triplet_topology_by_lca(parent_g, depth_g, a, b, c)
+        tp = _resolve_triplet_topology_by_lca(parent_p, depth_p, a, b, c)
+
+        if tg != 0:
+            gold_resolved += 1
+        if tp != 0:
+            pred_resolved += 1
+
+        if (tg != 0 or tp != 0) and (tg != tp):
+            mismatches += 1
+
+    td_raw = mismatches
+    td = (td_raw / total_triplets) if normalize else float(td_raw)
+    return td, total_triplets, gold_resolved, pred_resolved
+
+
+def generalized_triplet_distance(
+    tree_gold: Dict[int, List[int]],
+    tree_pred: Dict[int, List[int]],
+    n_leaves: int
+) -> Tuple[float, int, int, int, int]:
+    """
+    Generalized Triplet Distance（GTD）
+      gold で解像している三つ組だけを分母に取り、両木で同一トポロジーの割合を引いた 1 を返す。
+      戻り値: (gtd, resolved_in_gold, resolved_in_pred, shared_resolved, total_triplets)
+    """
+    if n_leaves < 3:
+        return 0.0, 0, 0, 0, 0
+
+    total_triplets = comb(n_leaves, 3)
+
+    depth_g, parent_g, _ = _compute_depth_map(tree_gold, n_leaves)
+    depth_p, parent_p, _ = _compute_depth_map(tree_pred, n_leaves)
+
+    Rg = 0      # gold で解像
+    Rp = 0      # pred で解像
+    shared = 0  # 両方解像かつ一致
+
+    for a, b, c in combinations(range(n_leaves), 3):
+        tg = _resolve_triplet_topology_by_lca(parent_g, depth_g, a, b, c)
+        tp = _resolve_triplet_topology_by_lca(parent_p, depth_p, a, b, c)
+
+        if tg != 0:
+            Rg += 1
+            if tp != 0:
+                Rp += 1
+                if tg == tp:
+                    shared += 1
+        else:
+            if tp != 0:
+                Rp += 1
+
+    if Rg == 0:
+        # 規約により 0（NaN 回避）
+        return 0.0, Rg, Rp, shared, total_triplets
+
+    gtd = 1.0 - (shared / Rg)
+    return gtd, Rg, Rp, shared, total_triplets
+
+
+# --------------------------------------------------------------------------- #
 # 2.6. Cophenetic correlation between two trees (topology-based)
 # --------------------------------------------------------------------------- #
 def _build_parent_map(adjacency: Dict[int, List[int]]) -> Dict[int, Optional[int]]:
@@ -1093,8 +1209,11 @@ def main() -> None:
                           pred_adj: Dict[int, List[int]],
                           pred_birth: Dict[int, float]) -> None:
         """Evaluate one layer, print results, and save to disk."""
+
+        # Jaccard-Robinson-Foulds distance
         jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
         jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
+
         # Quartet metrics
         qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
             gold_adj, pred_adj, n_leaves, normalize=True
@@ -1105,10 +1224,23 @@ def main() -> None:
         gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
             gold_adj, pred_adj, n_leaves
         )
+        # Triplet metrics
+        td_norm, t_total, t_gold_resolved, t_pred_resolved = triplet_distance(
+            gold_adj, pred_adj, n_leaves, normalize=True
+        )
+        td_raw, _, _, _ = triplet_distance(
+            gold_adj, pred_adj, n_leaves, normalize=False
+        )
+        gtd, t_res_gold, t_res_pred, t_shared, t_total2 = generalized_triplet_distance(
+            gold_adj, pred_adj, n_leaves
+        )
+
         # CASet (Ancestor Jaccard)
         caset_dist, caset_sim, caset_pairs = caset_ancestor_jaccard(
             gold_adj, pred_adj, n_leaves, include_super_root=False
         )
+
+        # Cophenetic correlation
         coph_r, coph_pairs, coph_p = cophenetic_correlation_between_trees(
             gold_adj, pred_adj, n_leaves
         )
@@ -1123,13 +1255,23 @@ def main() -> None:
         print(f"Model / Layer          : {args.model} / {layer_idx}")
         print(f"Template               : {args.template}")
         print(f"Entities               : {n_leaves}")
+        print("-----------------------------------------------------------")
         print(f"JRF Distance (k=1)     : {jrf1:.4f}")
         print(f"JRF Distance (k=2)     : {jrf2:.4f}")
+        print("-----------------------------------------------------------")
+        print(f"Triplet Distance (raw) : {td_raw}")
+        print(f"Triplet Distance (norm): {td_norm:.6f}  (denominator = C(n,3) = {t_total})")
+        print(f"GTD (gold reference)   : {gtd:.6f}")
+        print("-----------------------------------------------------------")
         print(f"Quartet Distance (raw) : {qd_raw}")
         print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
         print(f"GQD (gold reference)   : {gqd:.6f}")
+        print("-----------------------------------------------------------")
         print(f"CASet (Ancestor Jaccard) : dist={caset_dist:.6f}, sim={caset_sim:.6f}  (pairs = {caset_pairs})")
+        print("-----------------------------------------------------------")
         print(f"Cophenetic correlation  : {coph_r:.6f}  (pairs = {coph_pairs}, p = {coph_p:.3g})")
+        print("-----------------------------------------------------------")
+        print(f"Resolved triplets (gold/pred/shared): {t_res_gold} / {t_res_pred} / {int(t_shared)}")
         print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared)}")
         print(f"Splits (gold/pred)     : {len(splits1)} / {len(splits2)}")
 
@@ -1137,12 +1279,22 @@ def main() -> None:
         results = dict(dataset=str(args.input), model=args.model, layer=layer_idx,
                        template=args.template, n_entities=n_leaves,
                        jrf_k1=jrf1, jrf_k2=jrf2,
+                       
+                       td_raw=int(td_raw),
+                       td_norm=float(td_norm),
+                       triplets_total=int(t_total),
+                       triplets_gold_resolved=int(t_gold_resolved),
+                       triplets_pred_resolved=int(t_pred_resolved),
+                       gtd=float(gtd),
+                       triplets_shared_resolved=int(t_shared),
+
                        qd_raw=int(qd_raw),
                        qd_norm=float(qd_norm),
                        gqd=float(gqd),
                        quartets_total=int(q_total),
                        quartets_gold_resolved=int(q_gold_resolved),
                        quartets_pred_resolved=int(q_pred_resolved),
+                       
                        caset_distance=float(caset_dist),
                        caset_similarity=float(caset_sim),
                        caset_pairs=int(caset_pairs),

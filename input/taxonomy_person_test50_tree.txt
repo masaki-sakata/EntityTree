@@ -1,0 +1,57 @@
+Person
+├── Politician
+│   ├── Barack Obama
+│   ├── Margaret Thatcher
+│   ├── Winston Churchill
+│   ├── Nelson Mandela
+│   ├── Franklin D. Roosevelt
+│   ├── Abraham Lincoln
+│   ├── John F. Kennedy
+│   ├── Angela Merkel
+│   └── Mahatma Gandhi
+├── Actor
+│   ├── Meryl Streep
+│   ├── Denzel Washington
+│   ├── Tom Hanks
+│   ├── Leonardo DiCaprio
+│   ├── Marilyn Monroe
+│   ├── Robert De Niro
+│   ├── Audrey Hepburn
+│   ├── Morgan Freeman
+│   └── Charlie Chaplin
+├── Athlete
+│   ├── Michael Jordan
+│   ├── Lionel Messi
+│   ├── Usain Bolt
+│   ├── Serena Williams
+│   ├── Muhammad Ali
+│   ├── Tiger Woods
+│   ├── Cristiano Ronaldo
+│   └── Babe Ruth
+├── Musician
+│   ├── John Lennon
+│   ├── Michael Jackson
+│   ├── Madonna
+│   ├── Bob Dylan
+│   ├── Elvis Presley
+│   ├── Aretha Franklin
+│   ├── Mozart
+│   └── Beyoncé
+├── Scientist
+│   ├── Albert Einstein
+│   ├── Marie Curie
+│   ├── Isaac Newton
+│   ├── Charles Darwin
+│   ├── Nikola Tesla
+│   ├── Stephen Hawking
+│   ├── Galileo Galilei
+│   └── Ada Lovelace
+└── Business Person
+    ├── Steve Jobs
+    ├── Bill Gates
+    ├── Warren Buffett
+    ├── Elon Musk
+    ├── Jeff Bezos
+    ├── Henry Ford
+    ├── Walt Disney
+    └── Oprah Winfrey

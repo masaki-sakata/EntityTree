@@ -27,6 +27,10 @@ from hierarchy_node import HierarchyNode
 from html_tree_encoding import HTMLTreeEncoding as TreeEncoding
 import summarization
 import template  # Import our new template module
+from sklearn.decomposition import PCA
+import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+
 
 # Optional dependencies for PNG export
 try:
@@ -88,6 +92,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Standard deviation for random embeddings (only used with model=random_emb)")
     p.add_argument("--random_seed", type=int, default=42,
                    help="Random seed for reproducible embeddings (only used with model=random_emb)")
+
+    # PCA plots ---------------------------------------------------------------
+    p.add_argument("--pca", action="store_true",
+                   help="Also export PCA plots (2D PNG and 3D HTML)")
+    p.add_argument("--pca_label2d", action="store_true",
+                   help="Annotate labels in 2D PCA plot (may clutter)")
 
     return p
 
@@ -183,6 +193,134 @@ def export_to_png(html_path: Path, png_path: Path) -> bool:
         if 'driver' in locals():
             driver.quit()
         return False
+
+
+def _compute_pca(X: np.ndarray, max_components: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    """
+    PCAで主成分に射影した座標と寄与率を返す。
+    次元数/サンプル数に応じて自動で成分数を調整。
+    """
+    n_samples, n_features = X.shape
+    n_components = min(max_components, n_samples, n_features)
+    pca = PCA(n_components=n_components, random_state=0)
+    comps = pca.fit_transform(X)  # (N, n_components)
+    evr = pca.explained_variance_ratio_  # (n_components,)
+    return comps, evr
+
+
+def _group_indices_by_profession(entity_names: list[str], profession_map: Dict[str, str]) -> Dict[str, list[int]]:
+    groups: Dict[str, list[int]] = {}
+    for i, name in enumerate(entity_names):
+        prof = profession_map.get(name, "Person")
+        groups.setdefault(prof, []).append(i)
+    return groups
+
+
+def _save_pca_2d_png(
+    comps: np.ndarray,
+    evr: np.ndarray,
+    entity_names: list[str],
+    profession_map: Dict[str, str],
+    base_out: Path,
+    layer_idx: int,
+    file_name: str,
+    annotate: bool = False,
+) -> Path:
+    """
+    職業ごとに色分けして2D散布図をPNG出力。
+    """
+    # 2成分に満たない場合はゼロ埋め
+    if comps.shape[1] < 2:
+        pad = np.zeros((comps.shape[0], 2 - comps.shape[1]))
+        comps2 = np.hstack([comps, pad])
+    else:
+        comps2 = comps[:, :2]
+
+    x, y = comps2[:, 0], comps2[:, 1]
+
+    groups = _group_indices_by_profession(entity_names, profession_map)
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=160)
+    for prof, idxs in groups.items():
+        color = PROFESSION_COLORS.get(prof, "#CCCCCC")
+        ax.scatter(x[idxs], y[idxs], s=28, alpha=0.9, linewidths=0, label=prof, c=color)
+
+    if annotate:
+        for i, name in enumerate(entity_names):
+            ax.annotate(name, (x[i], y[i]), fontsize=7, alpha=0.8)
+
+    ax.set_xlabel(f"PC1 ({evr[0]*100:.1f}%)")
+    ax.set_ylabel(f"PC2 ({(evr[1]*100 if len(evr)>1 else 0):.1f}%)")
+    ax.set_title("PCA 2D")
+    ax.grid(True, linestyle=":", linewidth=0.6, alpha=0.6)
+    ax.legend(fontsize=8, frameon=False, ncols=2)
+    plt.tight_layout()
+
+    png_path = build_output_path(base_out, layer_idx, f"{file_name}_pca2d", "png")
+    fig.savefig(png_path)
+    plt.close(fig)
+    print(f"[PCA] 2D PNG exported: {png_path}")
+    return png_path
+
+
+def _save_pca_3d_html(
+    comps: np.ndarray,
+    evr: np.ndarray,
+    entity_names: list[str],
+    profession_map: Dict[str, str],
+    base_out: Path,
+    layer_idx: int,
+    file_name: str,
+) -> Path:
+    """
+    職業ごとにトレースを分けた3D散布図をPlotlyでHTML出力。
+    """
+    # 3成分に満たない場合はゼロ埋め
+    if comps.shape[1] < 3:
+        pad = np.zeros((comps.shape[0], 3 - comps.shape[1]))
+        comps3 = np.hstack([comps, pad])
+    else:
+        comps3 = comps[:, :3]
+
+    x, y, z = comps3[:, 0], comps3[:, 1], comps3[:, 2]
+
+    groups = _group_indices_by_profession(entity_names, profession_map)
+    traces = []
+    for prof, idxs in groups.items():
+        color = PROFESSION_COLORS.get(prof, "#CCCCCC")
+        hover_text = [
+            f"<b>{entity_names[i]}</b><br>Profession: {prof}<br>"
+            f"PC1: {x[i]:.3f}<br>PC2: {y[i]:.3f}<br>PC3: {z[i]:.3f}"
+            for i in idxs
+        ]
+        traces.append(
+            go.Scatter3d(
+                x=x[idxs], y=y[idxs], z=z[idxs],
+                mode="markers",
+                name=prof,
+                text=hover_text,
+                hovertemplate="%{text}<extra></extra>",
+                marker=dict(size=5, color=color, opacity=0.9),
+            )
+        )
+
+    title = "PCA 3D — EVR: [" + ", ".join([f"{v*100:.1f}%" for v in evr[:3]]) + "]"
+    fig = go.Figure(data=traces)
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis_title=f"PC1 ({evr[0]*100:.1f}%)",
+            yaxis_title=f"PC2 ({(evr[1]*100 if len(evr)>1 else 0):.1f}%)",
+            zaxis_title=f"PC3 ({(evr[2]*100 if len(evr)>2 else 0):.1f}%)",
+        ),
+        legend=dict(itemsizing="trace", font=dict(size=10)),
+        margin=dict(l=0, r=0, t=50, b=0),
+    )
+
+    html_path = build_output_path(base_out, layer_idx, f"{file_name}_pca3d", "html")
+    fig.write_html(str(html_path), include_plotlyjs="cdn", full_html=True)
+    print(f"[PCA] 3D HTML exported: {html_path}")
+    return html_path
 
 
 # --------------------------------------------------------------------------- #
@@ -369,6 +507,35 @@ def run(args) -> None:
         if args.export_png:
             png_path = build_output_path(base_out, l_idx, args.output_file_name, "png")
             export_to_png(html_path, png_path)
+            
+        # --- PCA plots --------------------------------------------------------
+        if args.pca:
+            try:
+                comps, evr = _compute_pca(embs, max_components=3)
+
+                _save_pca_2d_png(
+                    comps=comps,
+                    evr=evr,
+                    entity_names=entity_names,
+                    profession_map=profession_map,
+                    base_out=base_out,
+                    layer_idx=l_idx,
+                    file_name=args.output_file_name,
+                    annotate=args.pca_label2d,
+                )
+
+                _save_pca_3d_html(
+                    comps=comps,
+                    evr=evr,
+                    entity_names=entity_names,
+                    profession_map=profession_map,
+                    base_out=base_out,
+                    layer_idx=l_idx,
+                    file_name=args.output_file_name,
+                )
+            except Exception as e:
+                print(f"[PCA] Error while generating PCA plots: {e}")
+
 
 
 # --------------------------------------------------------------------------- #

@@ -7,7 +7,9 @@ DEVICE=cuda:0
 
 # Enable verbose mode for debugging token usage
 # Set to empty string to disable: VERBOSE=""
+# VERBOSE="--verbose"
 VERBOSE="--verbose"
+
 
 
 ####################################
@@ -16,22 +18,24 @@ MODEL="meta-llama/Meta-Llama-3-8B"
 METHOD=last_token
 BASE_OUTPUT_DIR="../output/${MODEL}"
 
-# echo "Running Meta-Llama-3-8B..."
-# # Template 1: entity_only
-# TEMPLATE="entity_only"
-# OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
+echo "Running Meta-Llama-3-8B..."
+# Template 1: entity_only
+TEMPLATE="entity_only"
+OUTPUT_DIR="${BASE_OUTPUT_DIR}/template_${TEMPLATE}"
 
-# echo "Template: ${TEMPLATE}"
-# uv run python3 visualize_tree.py \
-#     --input ${INPUT} \
-#     --output_dir ${OUTPUT_DIR} \
-#     --output_file_name ${OUTPUT_FILE_NAME} \
-#     --model ${MODEL} \
-#     --method ${METHOD} \
-#     --device ${DEVICE} \
-#     --template ${TEMPLATE} \
-#     --export_png \
-#     $VERBOSE
+echo "Template: ${TEMPLATE}"
+uv run python3 visualize_tree.py \
+    --input ${INPUT} \
+    --output_dir ${OUTPUT_DIR} \
+    --output_file_name ${OUTPUT_FILE_NAME} \
+    --model ${MODEL} \
+    --method ${METHOD} \
+    --device ${DEVICE} \
+    --template ${TEMPLATE} \
+    --export_png \
+    --pca \
+    --pca_label2d \
+    $VERBOSE
 
 # Template 2: occupation_question 
 TEMPLATE="occupation_question"
@@ -46,7 +50,10 @@ uv run python3 visualize_tree.py \
     --method ${METHOD} \
     --device ${DEVICE} \
     --template ${TEMPLATE} \
+    --pca \
+    --pca_label2d \
     $VERBOSE
+
 
 # Template 3: gift
 TEMPLATE="gift"
@@ -61,7 +68,10 @@ uv run python3 visualize_tree.py \
     --method ${METHOD} \
     --device ${DEVICE} \
     --template ${TEMPLATE} \
+    --pca \
+    --pca_label2d \
     $VERBOSE
+
 
 
 

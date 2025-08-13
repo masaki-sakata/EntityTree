@@ -1,0 +1,57 @@
+Person
+├── Politician
+│   ├── Jacinda Ardern
+│   ├── Ellen Johnson Sirleaf
+│   ├── Václav Havel
+│   ├── Helmut Kohl
+│   ├── Michelle Bachelet
+│   ├── John Major
+│   ├── Lee Hsien Loong
+│   ├── José Mujica
+│   └── Gro Harlem Brundtland
+├── Actor
+│   ├── Tilda Swinton
+│   ├── Chiwetel Ejiofor
+│   ├── Rachel Weisz
+│   ├── Gael García Bernal
+│   ├── Toni Collette
+│   ├── Mahershala Ali
+│   ├── Ken Watanabe
+│   ├── Saoirse Ronan
+│   └── Michael Fassbender
+├── Athlete
+│   ├── Tim Duncan
+│   ├── Allyson Felix
+│   ├── Hicham El Guerrouj
+│   ├── Yuna Kim
+│   ├── Haile Gebrselassie
+│   ├── Marta
+│   ├── Stan Wawrinka
+│   └── Abby Wambach
+├── Musician
+│   ├── St. Vincent
+│   ├── Beck
+│   ├── Norah Jones
+│   ├── Björk
+│   ├── Janelle Monáe
+│   ├── Florence Welch
+│   ├── Erik Satie
+│   └── Solange
+├── Scientist
+│   ├── Chien-Shiung Wu
+│   ├── Rosalind Franklin
+│   ├── Emmy Noether
+│   ├── Katherine Johnson
+│   ├── Barbara McClintock
+│   ├── Tu Youyou
+│   ├── Vera Rubin
+│   └── Subrahmanyan Chandrasekhar
+└── Business Person
+    ├── Sara Blakely
+    ├── Yvon Chouinard
+    ├── Tadashi Yanai
+    ├── Daniel Ek
+    ├── Indra Nooyi
+    ├── Melanie Perkins
+    ├── Stewart Butterfield
+    └── Tony Hsieh

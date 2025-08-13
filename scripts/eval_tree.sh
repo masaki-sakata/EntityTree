@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Common parameters
-INPUT="../input/taxonomy_person_test50.jsonl"
-OUTPUT_BASE_DIR="../output/eval_tree"
-DEVICE=cuda:3
+INPUT="../input/taxonomy_person_test50_popLow.jsonl"
+OUTPUT_BASE_DIR="../output/eval_tree_popLow"
+DEVICE=cuda:2
 
 # Enable verbose mode for debugging token usage
 # Set to empty string to disable: VERBOSE=""
@@ -37,17 +37,17 @@ uv run python3 eval_tree.py \
 # gold_binary
 ###################################
 echo "Running gold_binary..."
-MODEL="gold_binary_left"
-METHOD="average"
-OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}"
-echo "Left-leaning:"
-uv run python3 eval_tree.py \
-    --input ${INPUT} \
-    --output_dir ${OUTPUT_DIR} \
-    --model ${MODEL} \
-    --method ${METHOD} \
-    --device ${DEVICE} \
-    --export_visualizations 
+# MODEL="gold_binary_left"
+# METHOD="average"
+# OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}"
+# echo "Left-leaning:"
+# uv run python3 eval_tree.py \
+#     --input ${INPUT} \
+#     --output_dir ${OUTPUT_DIR} \
+#     --model ${MODEL} \
+#     --method ${METHOD} \
+#     --device ${DEVICE} \
+#     --export_visualizations 
 
 MODEL="gold_binary_balanced"
 OUTPUT_DIR="${OUTPUT_BASE_DIR}/${MODEL}"

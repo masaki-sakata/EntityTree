@@ -1,0 +1,48 @@
+Worker
+├── Politician
+│   ├── Legislator
+│   ├── Governor
+│   └── Mayor
+├── Actor
+│   ├── Comedian
+│   ├── Film_actor
+│   ├── Stage_actor
+│   ├── Television_actor
+│   └── Voice_actor
+├── Athlete
+│   ├── Association_football_player
+│   ├── Basketball_player
+│   ├── Tennis_player
+│   ├── Golfer
+│   ├── Boxer
+│   ├── Sprinter
+│   ├── Baseball_player
+│   └── Ice_hockey_player
+├── Musician
+│   ├── Singer
+│   ├── Composer
+│   ├── Songwriter
+│   ├── Conductor
+│   ├── Instrumentalist
+│   │   ├── Pianist
+│   │   ├── Guitarist
+│   │   └── Drummer
+│   ├── DJ
+│   └── Record_producer
+├── Scientist
+│   ├── Physicist
+│   ├── Chemist
+│   ├── Mathematician
+│   ├── Biologist
+│   ├── Computer_scientist
+│   ├── Astronomer
+│   ├── Economist
+│   ├── Psychologist
+│   ├── Neuroscientist
+│   └── Engineer
+└── Business_person
+    ├── Entrepreneur
+    ├── Business_executive
+    ├── Investor
+    ├── Marketer
+    └── Financier

@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Common parameters
-INPUT="../input/taxonomy_person_test50_popLow.jsonl"
-OUTPUT_BASE_DIR="../output/eval_tree_popLow"
-DEVICE=cuda:2
+INPUT="../input/tree_yago_300people.jsonl"
+OUTPUT_BASE_DIR="../output/eval_tree_300people"
+DEVICE=cuda:3
 
 # Enable verbose mode for debugging token usage
 # Set to empty string to disable: VERBOSE=""

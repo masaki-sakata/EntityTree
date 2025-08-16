@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # Common parameters
-INPUT="../input/taxonomy_person_test50.jsonl"
-OUTPUT_FILE_NAME="taxonomy_person_test50"
-DEVICE=cuda:0
+INPUT="../input/tree_yago_300people_annotated.jsonl"
+OUTPUT_FILE_NAME="taxonomy_person300"
+DEVICE=cuda:2
 
 # Enable verbose mode for debugging token usage
 # Set to empty string to disable: VERBOSE=""

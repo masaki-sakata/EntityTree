@@ -52,6 +52,23 @@ PROFESSION_COLORS = {
     "Person": "#A0A0A0"
 }
 
+from datetime import datetime
+import time
+from contextlib import contextmanager
+
+@contextmanager
+def timed(label: str):
+    start_wall = datetime.now()
+    start_perf = time.perf_counter()
+    print(f"[{label}] start: {start_wall:%Y-%m-%d %H:%M:%S.%f}")
+    try:
+        yield
+    finally:
+        end_wall = datetime.now()
+        elapsed = time.perf_counter() - start_perf
+        print(f"[{label}] end  : {end_wall:%Y-%m-%d %H:%M:%S.%f} (elapsed: {elapsed:.3f}s)\n")
+
+
 # --------------------------------------------------------------------------- #
 # 1. Gold tree utilities（元コードから変更なし）
 # --------------------------------------------------------------------------- #
@@ -1038,7 +1055,6 @@ def build_predicted_tree(
         embedder = EmbeddingModel(cfg)
         embs = embedder.encode(texts, list(entity_names))
 
-        # ← ここから追加（型の安全化 + 2次元化 + 返却）
         # PyTorch Tensor の場合は numpy に
         if hasattr(embs, "detach"):
             embs = embs.detach().cpu().numpy()
@@ -1046,7 +1062,9 @@ def build_predicted_tree(
         if getattr(embs, "ndim", None) == 3:
             embs = embs[0]
 
+        print("Starting hierarchical clustering persistence calculation …")
         hierarchy = HierarchyNode(embs)
+        print("Calculating persistence …")
         hierarchy.calculate_persistence()
         return hierarchy.h_nodes_adj, hierarchy.birth_time
         
@@ -1210,40 +1228,52 @@ def main() -> None:
                           pred_birth: Dict[int, float]) -> None:
         """Evaluate one layer, print results, and save to disk."""
 
-        # Jaccard-Robinson-Foulds distance
-        jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
-        jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
+        with timed("Jaccard-Robinson-Foulds distance (k=1)"):
+            jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
 
-        # Quartet metrics
-        qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
-            gold_adj, pred_adj, n_leaves, normalize=True
-        )
-        qd_raw, _, _, _ = quartet_distance(
-            gold_adj, pred_adj, n_leaves, normalize=False
-        )
-        gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
-            gold_adj, pred_adj, n_leaves
-        )
-        # Triplet metrics
-        td_norm, t_total, t_gold_resolved, t_pred_resolved = triplet_distance(
-            gold_adj, pred_adj, n_leaves, normalize=True
-        )
-        td_raw, _, _, _ = triplet_distance(
-            gold_adj, pred_adj, n_leaves, normalize=False
-        )
-        gtd, t_res_gold, t_res_pred, t_shared, t_total2 = generalized_triplet_distance(
-            gold_adj, pred_adj, n_leaves
-        )
+        with timed("Jaccard-Robinson-Foulds distance (k=2)"):
+            jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
 
-        # CASet (Ancestor Jaccard)
-        caset_dist, caset_sim, caset_pairs = caset_ancestor_jaccard(
-            gold_adj, pred_adj, n_leaves, include_super_root=False
-        )
+        # with timed("Quartet distance (normalize=True)"):
+        #     qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
+        #         gold_adj, pred_adj, n_leaves, normalize=True
+        #     )
+
+        # with timed("Quartet distance (normalize=False)"):
+        #     qd_raw, _, _, _ = quartet_distance(
+        #         gold_adj, pred_adj, n_leaves, normalize=False
+        #     )
+
+        with timed("Generalized quartet distance"):
+            gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
+                gold_adj, pred_adj, n_leaves
+            )
+
+        # with timed("Triplet distance (normalize=True)"):
+        #     td_norm, t_total, t_gold_resolved, t_pred_resolved = triplet_distance(
+        #         gold_adj, pred_adj, n_leaves, normalize=True
+        #     )
+
+        # with timed("Triplet distance (normalize=False)"):
+        #     td_raw, _, _, _ = triplet_distance(
+        #         gold_adj, pred_adj, n_leaves, normalize=False
+        #     )
+
+        with timed("Generalized triplet distance"):
+            gtd, t_res_gold, t_res_pred, t_shared, t_total2 = generalized_triplet_distance(
+                gold_adj, pred_adj, n_leaves
+            )
+
+        # with timed("CASet (Ancestor Jaccard) distance"):
+        #     caset_dist, caset_sim, caset_pairs = caset_ancestor_jaccard(
+        #         gold_adj, pred_adj, n_leaves, include_super_root=False
+        #     )
 
         # Cophenetic correlation
-        coph_r, coph_pairs, coph_p = cophenetic_correlation_between_trees(
-            gold_adj, pred_adj, n_leaves
-        )
+        with timed("Evaluating cophenetic correlation"):
+            coph_r, coph_pairs, coph_p = cophenetic_correlation_between_trees(
+                gold_adj, pred_adj, n_leaves
+            )
 
         # Debug splits summary (optional)
         splits1 = _collect_splits(gold_adj, n_leaves)
@@ -1259,45 +1289,47 @@ def main() -> None:
         print(f"JRF Distance (k=1)     : {jrf1:.4f}")
         print(f"JRF Distance (k=2)     : {jrf2:.4f}")
         print("-----------------------------------------------------------")
-        print(f"Triplet Distance (raw) : {td_raw}")
-        print(f"Triplet Distance (norm): {td_norm:.6f}  (denominator = C(n,3) = {t_total})")
+        # print(f"Triplet Distance (raw) : {td_raw}")
+        # print(f"Triplet Distance (norm): {td_norm:.6f}  (denominator = C(n,3) = {t_total})")
         print(f"GTD (gold reference)   : {gtd:.6f}")
         print("-----------------------------------------------------------")
-        print(f"Quartet Distance (raw) : {qd_raw}")
-        print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
+        # print(f"Quartet Distance (raw) : {qd_raw}")
+        # print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
         print(f"GQD (gold reference)   : {gqd:.6f}")
         print("-----------------------------------------------------------")
-        print(f"CASet (Ancestor Jaccard) : dist={caset_dist:.6f}, sim={caset_sim:.6f}  (pairs = {caset_pairs})")
-        print("-----------------------------------------------------------")
+        # print(f"CASet (Ancestor Jaccard) : dist={caset_dist:.6f}, sim={caset_sim:.6f}  (pairs = {caset_pairs})")
+        # print("-----------------------------------------------------------")
         print(f"Cophenetic correlation  : {coph_r:.6f}  (pairs = {coph_pairs}, p = {coph_p:.3g})")
         print("-----------------------------------------------------------")
         print(f"Resolved triplets (gold/pred/shared): {t_res_gold} / {t_res_pred} / {int(t_shared)}")
-        print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared)}")
+        # print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared)}")
         print(f"Splits (gold/pred)     : {len(splits1)} / {len(splits2)}")
 
         # Save per-layer results
         results = dict(dataset=str(args.input), model=args.model, layer=layer_idx,
                        template=args.template, n_entities=n_leaves,
                        jrf_k1=jrf1, jrf_k2=jrf2,
-                       
-                       td_raw=int(td_raw),
-                       td_norm=float(td_norm),
-                       triplets_total=int(t_total),
-                       triplets_gold_resolved=int(t_gold_resolved),
-                       triplets_pred_resolved=int(t_pred_resolved),
+                    #    td_raw=int(td_raw),
+                    #    td_norm=float(td_norm),
+                    #    triplets_total=int(t_total),
+                    #    triplets_gold_resolved=int(t_gold_resolved),
+                    #    triplets_pred_resolved=int(t_pred_resolved),
+
                        gtd=float(gtd),
                        triplets_shared_resolved=int(t_shared),
 
-                       qd_raw=int(qd_raw),
-                       qd_norm=float(qd_norm),
+                    #    qd_raw=int(qd_raw),
+                    #    qd_norm=float(qd_norm),
+
                        gqd=float(gqd),
-                       quartets_total=int(q_total),
-                       quartets_gold_resolved=int(q_gold_resolved),
-                       quartets_pred_resolved=int(q_pred_resolved),
                        
-                       caset_distance=float(caset_dist),
-                       caset_similarity=float(caset_sim),
-                       caset_pairs=int(caset_pairs),
+                    #    quartets_total=int(q_total),
+                    #    quartets_gold_resolved=int(q_gold_resolved),
+                    #    quartets_pred_resolved=int(q_pred_resolved),
+                       
+                    #    caset_distance=float(caset_dist),
+                    #    caset_similarity=float(caset_sim),
+                    #    caset_pairs=int(caset_pairs),
                        cophenetic_corr=float(coph_r),
                        cophenetic_pairs=int(coph_pairs),
                        cophenetic_p=float(coph_p),

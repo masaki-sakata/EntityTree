@@ -134,3 +134,7 @@ view_html.ipynb
 .RData
 .Rhistory
 .diff
+
+*_old.*
+
+models

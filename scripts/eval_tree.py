@@ -344,43 +344,202 @@ def _resolve_quartet_topology(splits: Set[int], n_leaves: int, a: int, b: int, c
     return 0
 
 
-def quartet_distance(
-    tree_gold: Dict[int, List[int]],
-    tree_pred: Dict[int, List[int]],
-    n_leaves: int,
-    normalize: bool = True
-) -> Tuple[float, int, int, int]:
+# def quartet_distance(
+#     tree_gold: Dict[int, List[int]],
+#     tree_pred: Dict[int, List[int]],
+#     n_leaves: int,
+#     normalize: bool = True
+# ) -> Tuple[float, int, int, int]:
+#     """
+#     標準 Quartet Distance（両木のトポロジー一致=0、不一致=1。両方未解像は0にカウント）
+#     戻り値: (qd, total_quartets, gold_resolved, pred_resolved)
+#     """
+#     if n_leaves < 4:
+#         return 0.0, 0, 0, 0
+
+#     total_quartets = comb(n_leaves, 4)
+#     Sg = _collect_unique_split_bitsets(tree_gold, n_leaves)
+#     Sp = _collect_unique_split_bitsets(tree_pred, n_leaves)
+
+#     mismatches = 0
+#     gold_resolved = 0
+#     pred_resolved = 0
+
+#     # 4点組の直接評価
+#     for a, b, c, d in combinations(range(n_leaves), 4):
+#         tg = _resolve_quartet_topology(Sg, n_leaves, a, b, c, d)
+#         tp = _resolve_quartet_topology(Sp, n_leaves, a, b, c, d)
+#         if tg != 0:
+#             gold_resolved += 1
+#         if tp != 0:
+#             pred_resolved += 1
+#         # 少なくとも片方が解像していて、トポロジーが異なるなら不一致
+#         if (tg != 0 or tp != 0) and (tg != tp):
+#             mismatches += 1
+
+#     qd_raw = mismatches
+#     qd = (qd_raw / total_quartets) if normalize else float(qd_raw)
+#     return qd, total_quartets, gold_resolved, pred_resolved
+
+
+# def generalized_quartet_distance(
+#     tree_gold: Dict[int, List[int]],
+#     tree_pred: Dict[int, List[int]],
+#     n_leaves: int
+# ) -> Tuple[float, int, int, int, int]:
+#     """
+#     Generalized Quartet Distance（GQD）
+#       gold で解像している quartet に限定し、同じトポロジーでないものを分子に。
+#       戻り値: (gqd, resolved_in_gold, resolved_in_pred, shared_resolved, total_quartets)
+#     """
+#     if n_leaves < 4:
+#         return 0.0, 0, 0, 0, 0
+
+#     total_quartets = comb(n_leaves, 4)
+#     Sg = _collect_unique_split_bitsets(tree_gold, n_leaves)
+#     Sp = _collect_unique_split_bitsets(tree_pred, n_leaves)
+
+#     Rg = 0     # gold resolved
+#     Rp = 0     # pred resolved
+#     shared = 0 # 両方解像かつ同じトポロジー
+
+#     for a, b, c, d in combinations(range(n_leaves), 4):
+#         tg = _resolve_quartet_topology(Sg, n_leaves, a, b, c, d)
+#         tp = _resolve_quartet_topology(Sp, n_leaves, a, b, c, d)
+#         if tg != 0:
+#             Rg += 1
+#             if tp != 0:
+#                 Rp += 1
+#                 if tg == tp:
+#                     shared += 1
+#         else:
+#             if tp != 0:
+#                 Rp += 1
+
+#     if Rg == 0:
+#         # 定義上 0 とする（規約）。NaN 回避。
+#         return 0.0, Rg, Rp, shared, total_quartets
+
+#     gqd = 1.0 - (shared / Rg)
+#     return gqd, Rg, Rp, shared, total_quartets
+
+
+
+# --------------- helpers ---------------------------
+
+def _c2(x: int) -> int:
+    return (x * (x - 1)) // 2
+
+def _c4(n: int) -> int:
+    return (n * (n - 1) * (n - 2) * (n - 3)) // 24
+
+def _popcount(x: int) -> int:
+    try:
+        return x.bit_count()  # Python 3.8+
+    except AttributeError:
+        return bin(x).count("1")
+
+def _parent_map(adjacency: Dict[int, List[int]]) -> Dict[int, int]:
+    return {c: p for p, cs in adjacency.items() for c in cs}
+
+def _leafsets_bits(adjacency: Dict[int, List[int]], n_leaves: int) -> Dict[int, int]:
+    """各ノード配下の葉集合をintビット集合で返す（正しいポストオーダー集計）。"""
+    # すべてのノードを収集
+    nodes = set(adjacency.keys()) | {c for cs in adjacency.values() for c in cs} | set(range(n_leaves))
+    children = adjacency
+
+    # トポロジカル順（根→葉）
+    order = []
+    indeg = {u: 0 for u in nodes}
+    for p, cs in children.items():
+        for c in cs:
+            indeg[c] = indeg.get(c, 0) + 1
+    from collections import deque
+    q = deque([u for u in nodes if indeg.get(u, 0) == 0])
+    while q:
+        u = q.popleft()
+        order.append(u)
+        for v in children.get(u, []):
+            indeg[v] -= 1
+            if indeg[v] == 0:
+                q.append(v)
+
+    # 逆順（葉→根）で集計
+    bits: Dict[int, int] = {}
+    for u in reversed(order):
+        if u < n_leaves:
+            bits[u] = 1 << u
+        else:
+            b = 0
+            for v in children.get(u, []):
+                b |= bits.get(v, 0)
+            bits[u] = b
+    return bits
+
+# --------------- components utilities ---------------------------
+
+def _components_around_each_node(
+    adjacency: Dict[int, List[int]],
+    n: int,
+    bits: Dict[int, int],
+    parent: Dict[int, int],
+) -> Dict[int, List[int]]:
     """
-    標準 Quartet Distance（両木のトポロジー一致=0、不一致=1。両方未解像は0にカウント）
-    戻り値: (qd, total_quartets, gold_resolved, pred_resolved)
+    各内部ノード v に接続する“成分”をビット集合で列挙する。
+      - 子側成分: 各子 c の bits[c]
+      - 親側成分: root 以外は U ^ bits[v]
     """
-    if n_leaves < 4:
-        return 0.0, 0, 0, 0
+    U = (1 << n) - 1
+    comps: Dict[int, List[int]] = {}
+    for v, cs in adjacency.items():
+        lst = []
+        for c in cs:
+            b = bits[c]
+            if b:
+                lst.append(b)
+        if v in parent:  # 親側成分
+            up = U ^ bits[v]
+            if up:
+                lst.append(up)
+        comps[v] = lst
+    return comps
 
-    total_quartets = comb(n_leaves, 4)
-    Sg = _collect_unique_split_bitsets(tree_gold, n_leaves)
-    Sp = _collect_unique_split_bitsets(tree_pred, n_leaves)
+def _count_star_quartets(
+    adjacency: Dict[int, List[int]],
+    n: int,
+    bits: Dict[int, int],
+    parent: Dict[int, int],
+) -> int:
+    """star quartets の総数：各ノード周りで4成分から1枚ずつ選ぶ積の総和。"""
+    comps = _components_around_each_node(adjacency, n, bits, parent)
+    total = 0
+    for v, lst in comps.items():
+        sizes = [_popcount(b) for b in lst if _popcount(b) > 0]
+        m = len(sizes)
+        if m < 4:
+            continue
+        # Σ_{i<j<k<l} s_i s_j s_k s_l
+        # 小 m 向けに四重ループで十分（木の次数は小さいことが多い）
+        for a in range(m):
+            sa = sizes[a]
+            if sa == 0:  # 念のため
+                continue
+            for b in range(a + 1, m):
+                sb = sizes[b]
+                if sb == 0:
+                    continue
+                for c in range(b + 1, m):
+                    sc = sizes[c]
+                    if sc == 0:
+                        continue
+                    for d in range(c + 1, m):
+                        sd = sizes[d]
+                        if sd == 0:
+                            continue
+                        total += sa * sb * sc * sd
+    return total
 
-    mismatches = 0
-    gold_resolved = 0
-    pred_resolved = 0
-
-    # 4点組の直接評価
-    for a, b, c, d in combinations(range(n_leaves), 4):
-        tg = _resolve_quartet_topology(Sg, n_leaves, a, b, c, d)
-        tp = _resolve_quartet_topology(Sp, n_leaves, a, b, c, d)
-        if tg != 0:
-            gold_resolved += 1
-        if tp != 0:
-            pred_resolved += 1
-        # 少なくとも片方が解像していて、トポロジーが異なるなら不一致
-        if (tg != 0 or tp != 0) and (tg != tp):
-            mismatches += 1
-
-    qd_raw = mismatches
-    qd = (qd_raw / total_quartets) if normalize else float(qd_raw)
-    return qd, total_quartets, gold_resolved, pred_resolved
-
+# --------------- GQD: gold-reference version ---------------------------
 
 def generalized_quartet_distance(
     tree_gold: Dict[int, List[int]],
@@ -388,40 +547,188 @@ def generalized_quartet_distance(
     n_leaves: int
 ) -> Tuple[float, int, int, int, int]:
     """
-    Generalized Quartet Distance（GQD）
-      gold で解像している quartet に限定し、同じトポロジーでないものを分子に。
-      戻り値: (gqd, resolved_in_gold, resolved_in_pred, shared_resolved, total_quartets)
+    GQD（Generalized Quartet Distance, gold基準）。
+    定義：gqd = 1 - ( shared_butterflies / q_gold )
+      - q_gold: gold 木における butterfly quartets 総数
+                = C(n,4) - （gold の star quartets 総数）
+      - shared_butterflies: gold/pred の両方で同一トポロジーの butterfly に属する四葉組の数
+    返り値: (gqd, q_gold, q_pred, shared_butterflies, C(n,4))
     """
     if n_leaves < 4:
         return 0.0, 0, 0, 0, 0
 
-    total_quartets = comb(n_leaves, 4)
-    Sg = _collect_unique_split_bitsets(tree_gold, n_leaves)
-    Sp = _collect_unique_split_bitsets(tree_pred, n_leaves)
+    # 準備
+    bits_g = _leafsets_bits(tree_gold, n_leaves)
+    bits_p = _leafsets_bits(tree_pred, n_leaves)
+    parent_g = _parent_map(tree_gold)
+    parent_p = _parent_map(tree_pred)
+    U4 = comb(n_leaves, 4)
 
-    Rg = 0     # gold resolved
-    Rp = 0     # pred resolved
-    shared = 0 # 両方解像かつ同じトポロジー
+    # 分母 q_gold（正）
+    stars_g = _count_star_quartets(tree_gold, n_leaves, bits_g, parent_g)
+    q_gold = U4 - stars_g
+    if q_gold <= 0:
+        # gold が完全スター（解像なし）の場合
+        return 0.0, 0, 0, 0, U4
 
-    for a, b, c, d in combinations(range(n_leaves), 4):
-        tg = _resolve_quartet_topology(Sg, n_leaves, a, b, c, d)
-        tp = _resolve_quartet_topology(Sp, n_leaves, a, b, c, d)
-        if tg != 0:
-            Rg += 1
-            if tp != 0:
-                Rp += 1
-                if tg == tp:
-                    shared += 1
-        else:
-            if tp != 0:
-                Rp += 1
+    # 参考情報として pred 側の butterfly 総数も出す（Rp 相当）
+    stars_p = _count_star_quartets(tree_pred, n_leaves, bits_p, parent_p)
+    q_pred = U4 - stars_p
+
+    # 共有 butterfly 数（同一トポロジー）
+    # ノード×ノードの成分交差行列 M_{i,j} を使う
+    comps_g = _components_around_each_node(tree_gold, n_leaves, bits_g, parent_g)
+    comps_p = _components_around_each_node(tree_pred, n_leaves, bits_p, parent_p)
+
+    shared = 0
+    for v, Sv in comps_g.items():
+        # 0 サイズ成分は除外
+        Sv = [b for b in Sv if _popcount(b) > 0]
+        if len(Sv) < 2:
+            continue
+        for w, Tw in comps_p.items():
+            Tw = [b for b in Tw if _popcount(b) > 0]
+            if len(Tw) < 2:
+                continue
+
+            # 交差行列 M[i][j] = |Sv[i] ∩ Tw[j]|
+            m = len(Sv)
+            n = len(Tw)
+            M = [[0] * n for _ in range(m)]
+            for i in range(m):
+                row_mask = Sv[i]
+                for j in range(n):
+                    M[i][j] = _popcount(row_mask & Tw[j])
+
+            # Σ_{i<j} Σ_{p<q} [ C(M_ip,2)C(M_jq,2) + C(M_iq,2)C(M_jp,2) ]
+            for i in range(m):
+                for j in range(i + 1, m):
+                    Mi = M[i]
+                    Mj = M[j]
+                    for p in range(n):
+                        mip = Mi[p]
+                        if mip >= 2:
+                            c_mip = _c2(mip)
+                        else:
+                            c_mip = 0
+                        for q in range(p + 1, n):
+                            miq = Mi[q]
+                            mjp = Mj[p]
+                            mjq = Mj[q]
+
+                            term1 = (_c2(mip) if mip >= 2 else 0) * (_c2(mjq) if mjq >= 2 else 0)
+                            term2 = (_c2(miq) if miq >= 2 else 0) * (_c2(mjp) if mjp >= 2 else 0)
+                            if term1 or term2:
+                                shared += term1 + term2
+
+    # gqd は [0,1] に収まる
+    gqd = 1.0 if shared == 0 else 1.0 - (shared / q_gold)
+    # 浮動小数の丸め誤差対策でクリップ
+    if gqd < 0.0:
+        gqd = 0.0
+    elif gqd > 1.0:
+        gqd = 1.0
+
+    return gqd, q_gold, q_pred, shared, U4
+
+# --------------- GTD: 高速実装（あなたの式＋バグ修正） ---------------
+
+def _cluster_info(adjacency: Dict[int, List[int]], n_leaves: int):
+    """
+    各内部ノード v について
+      - bits_v: 配下葉のビット集合
+      - child_bits: 各子の葉ビット集合
+      - sz_v, sum_child_sq: |L(v)| と Σ |L(child)|^2
+    """
+    bits = _leafsets_bits(adjacency, n_leaves)
+    info = []
+    for v, cs in adjacency.items():
+        if not cs:
+            continue
+        bv = bits[v]
+        sz = _popcount(bv)
+        if sz < 2:
+            continue
+        child_bits = [bits[c] for c in cs]
+        sum_sq = sum((_popcount(b)) ** 2 for b in child_bits)
+        info.append((v, bv, sz, child_bits, sum_sq))
+    return info  # list of tuples
+
+def generalized_triplet_distance(
+    tree_gold: Dict[int, List[int]],
+    tree_pred: Dict[int, List[int]],
+    n_leaves: int
+) -> Tuple[float, int, int, int, int]:
+    """
+    GTD（Generalized Triplet Distance）。
+      gtd = 1 - (shared / Rg)
+    ここで
+      - Rg = gold の解像 triplet 総数
+      - shared = gold/pred の両方で同一トポロジーの triplet 数
+    返り値: (gtd, Rg, Rp, shared, C(n,3))
+    """
+    if n_leaves < 3:
+        return 0.0, 0, 0, 0, 0
+
+    gold = _cluster_info(tree_gold, n_leaves)
+    pred = _cluster_info(tree_pred, n_leaves)
+
+    # gold/pred の解像triplet数
+    Rg = 0
+    for _, _, sz, child_bits, sum_sq in gold:
+        pairs_exact = (sz * sz - sum_sq) // 2
+        Rg += pairs_exact * (n_leaves - sz)
+
+    Rp = 0
+    for _, _, sz, child_bits, sum_sq in pred:
+        pairs_exact = (sz * sz - sum_sq) // 2
+        Rp += pairs_exact * (n_leaves - sz)
 
     if Rg == 0:
-        # 定義上 0 とする（規約）。NaN 回避。
-        return 0.0, Rg, Rp, shared, total_quartets
+        return 0.0, 0, Rp, 0, comb(n_leaves, 3)
 
-    gqd = 1.0 - (shared / Rg)
-    return gqd, Rg, Rp, shared, total_quartets
+    # 共有triplet数
+    shared = 0
+    for _, Av, szA, A_children, _ in gold:
+        for _, Bw, szB, B_children, _ in pred:
+            T = _popcount(Av & Bw)
+            if T < 2:
+                continue
+            # 行（gold子ごと）と列（pred子ごと）
+            sum_rows_sq = 0
+            for Ab in A_children:
+                sum_rows_sq += (_popcount(Ab & Bw)) ** 2
+            sum_cols_sq = 0
+            for Bb in B_children:
+                sum_cols_sq += (_popcount(Bb & Av)) ** 2
+            sum_cells_sq = 0
+            for Ab in A_children:
+                Ab_and = Ab & Bw
+                if Ab_and == 0:
+                    continue
+                for Bb in B_children:
+                    m = _popcount(Ab_and & Bb)
+                    if m:
+                        sum_cells_sq += m * m
+
+            pairs_exact_vw = (T * T - sum_rows_sq - sum_cols_sq + sum_cells_sq) // 2
+            if pairs_exact_vw == 0:
+                continue
+            # 外側のcは A∪B の外：|A∪B| = szA + szB - T
+            outside = n_leaves - (szA + szB - T)
+            if outside > 0:
+                shared += pairs_exact_vw * outside
+
+    gtd = 1.0 - (shared / Rg)
+    if gtd < 0.0:
+        gtd = 0.0
+    elif gtd > 1.0:
+        gtd = 1.0
+    return gtd, Rg, Rp, shared, comb(n_leaves, 3)
+
+
+
+
 
 # --------------------------------------------------------------------------- #
 # 2.55. Triplet distance (rooted; supports multifurcating/forest)
@@ -1228,46 +1535,22 @@ def main() -> None:
                           pred_birth: Dict[int, float]) -> None:
         """Evaluate one layer, print results, and save to disk."""
 
+        # Jaccard-Robinson-Foulds distance
         with timed("Jaccard-Robinson-Foulds distance (k=1)"):
             jrf1 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=1)
-
         with timed("Jaccard-Robinson-Foulds distance (k=2)"):
             jrf2 = jaccard_robinson_foulds_distance(gold_adj, pred_adj, n_leaves, k=2)
 
-        # with timed("Quartet distance (normalize=True)"):
-        #     qd_norm, q_total, q_gold_resolved, q_pred_resolved = quartet_distance(
-        #         gold_adj, pred_adj, n_leaves, normalize=True
-        #     )
-
-        # with timed("Quartet distance (normalize=False)"):
-        #     qd_raw, _, _, _ = quartet_distance(
-        #         gold_adj, pred_adj, n_leaves, normalize=False
-        #     )
-
+        # Generalized quartet distance
         with timed("Generalized quartet distance"):
             gqd, g_res_gold, g_res_pred, g_shared, g_total = generalized_quartet_distance(
                 gold_adj, pred_adj, n_leaves
             )
-
-        # with timed("Triplet distance (normalize=True)"):
-        #     td_norm, t_total, t_gold_resolved, t_pred_resolved = triplet_distance(
-        #         gold_adj, pred_adj, n_leaves, normalize=True
-        #     )
-
-        # with timed("Triplet distance (normalize=False)"):
-        #     td_raw, _, _, _ = triplet_distance(
-        #         gold_adj, pred_adj, n_leaves, normalize=False
-        #     )
-
+        # Generalized triplet distance
         with timed("Generalized triplet distance"):
             gtd, t_res_gold, t_res_pred, t_shared, t_total2 = generalized_triplet_distance(
                 gold_adj, pred_adj, n_leaves
             )
-
-        # with timed("CASet (Ancestor Jaccard) distance"):
-        #     caset_dist, caset_sim, caset_pairs = caset_ancestor_jaccard(
-        #         gold_adj, pred_adj, n_leaves, include_super_root=False
-        #     )
 
         # Cophenetic correlation
         with timed("Evaluating cophenetic correlation"):
@@ -1289,47 +1572,22 @@ def main() -> None:
         print(f"JRF Distance (k=1)     : {jrf1:.4f}")
         print(f"JRF Distance (k=2)     : {jrf2:.4f}")
         print("-----------------------------------------------------------")
-        # print(f"Triplet Distance (raw) : {td_raw}")
-        # print(f"Triplet Distance (norm): {td_norm:.6f}  (denominator = C(n,3) = {t_total})")
         print(f"GTD (gold reference)   : {gtd:.6f}")
         print("-----------------------------------------------------------")
-        # print(f"Quartet Distance (raw) : {qd_raw}")
-        # print(f"Quartet Distance (norm): {qd_norm:.6f}  (denominator = C(n,4) = {q_total})")
         print(f"GQD (gold reference)   : {gqd:.6f}")
         print("-----------------------------------------------------------")
-        # print(f"CASet (Ancestor Jaccard) : dist={caset_dist:.6f}, sim={caset_sim:.6f}  (pairs = {caset_pairs})")
-        # print("-----------------------------------------------------------")
         print(f"Cophenetic correlation  : {coph_r:.6f}  (pairs = {coph_pairs}, p = {coph_p:.3g})")
         print("-----------------------------------------------------------")
         print(f"Resolved triplets (gold/pred/shared): {t_res_gold} / {t_res_pred} / {int(t_shared)}")
-        # print(f"Resolved quartets (gold/pred/shared): {q_gold_resolved} / {q_pred_resolved} / {int(g_shared)}")
         print(f"Splits (gold/pred)     : {len(splits1)} / {len(splits2)}")
 
         # Save per-layer results
         results = dict(dataset=str(args.input), model=args.model, layer=layer_idx,
                        template=args.template, n_entities=n_leaves,
                        jrf_k1=jrf1, jrf_k2=jrf2,
-                    #    td_raw=int(td_raw),
-                    #    td_norm=float(td_norm),
-                    #    triplets_total=int(t_total),
-                    #    triplets_gold_resolved=int(t_gold_resolved),
-                    #    triplets_pred_resolved=int(t_pred_resolved),
-
                        gtd=float(gtd),
                        triplets_shared_resolved=int(t_shared),
-
-                    #    qd_raw=int(qd_raw),
-                    #    qd_norm=float(qd_norm),
-
                        gqd=float(gqd),
-                       
-                    #    quartets_total=int(q_total),
-                    #    quartets_gold_resolved=int(q_gold_resolved),
-                    #    quartets_pred_resolved=int(q_pred_resolved),
-                       
-                    #    caset_distance=float(caset_dist),
-                    #    caset_similarity=float(caset_sim),
-                    #    caset_pairs=int(caset_pairs),
                        cophenetic_corr=float(coph_r),
                        cophenetic_pairs=int(coph_pairs),
                        cophenetic_p=float(coph_p),

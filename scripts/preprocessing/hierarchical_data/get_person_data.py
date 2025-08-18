@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-YAGO 4.5 から各カテゴリ 50 名（計 300 名）をサンプルし、
+YAGO 4.5 から各カテゴリ k 名（計 k * 6 名）をサンプルし、
 「最初に与えた木」と「各カテゴリの人物ノード」を同じ JSONL に保存する。
 
 - YAGO: 候補抽出（rdf:type が該当職能クラス）
@@ -25,7 +25,11 @@ import time
 
 # ====== 基本設定 ======
 TREE_ID = 1
-OUT_PATH = "/home/masaki/hierarchical-repr/EntityTree/input/tree_yago_1200people.jsonl"
+TARGET_PER_CATEGORY = 2000
+PER_CATEGORY_LIMIT  = 6000 * (TARGET_PER_CATEGORY / 50)
+MAX_PER_COUNTRY     = 8 * (TARGET_PER_CATEGORY / 50)
+
+OUT_PATH = f"/home/masaki/hierarchical-repr/EntityTree/input/tree_yago_{TARGET_PER_CATEGORY}people.jsonl"
 
 # YAGO / Wikidata SPARQL エンドポイント
 YAGO_ENDPOINT = "https://yago-knowledge.org/sparql/query"
@@ -33,10 +37,6 @@ WD_ENDPOINT   = "https://query.wikidata.org/sparql"
 UA = "yago-wikidata-tree-sampler/0.3 (+https://yago-knowledge.org)"
 
 random.seed(42); np.random.seed(42)
-
-TARGET_PER_CATEGORY = 50 * 4
-PER_CATEGORY_LIMIT  = 6000 * 4
-MAX_PER_COUNTRY     = 8 * 4
 
 # ルートと 6 カテゴリ（Wikidata の QIDを固定）
 ROOT_NODE = {"label": "Person", "qid": "Q215627"}

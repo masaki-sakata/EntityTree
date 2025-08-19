@@ -4,30 +4,17 @@
 """
 
 uv run python3 train_lda_classifier.py \
-  --input /home/masaki/hierarchical-repr/EntityTree/input/300people/tr80_te20/train240.jsonl \
+  --input /home/masaki/hierarchical-repr/EntityTree/input/300people/train250.jsonl \
   --outdir ../models/lda \
   --model meta-llama/Meta-Llama-3-8B \
   --method last_token \
+  --template entity_only \
   --layer all \
   --device cuda \
   --solver svd \
   --n_components 5 \
   --shrinkage none \
   --verbose
-
-
-uv run python3 train_lda_classifier.py \
-  --input /home/masaki/hierarchical-repr/EntityTree/input/300people/tr80_te20/train240.jsonl \
-  --outdir ../models/lda \
-  --model fasttext \
-  --method average \
-  --layer all \
-  --device cuda \
-  --solver svd \
-  --n_components 5 \
-  --shrinkage none \
-  --verbose
-
 
 """
 

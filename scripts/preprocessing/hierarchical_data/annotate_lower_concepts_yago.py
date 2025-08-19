@@ -14,8 +14,8 @@ Annotate JSONL with sub-occupations via YAGO 4.5 SPARQL — canonical tree & sin
 
 使い方（例）
 uv run python3 annotate_lower_concepts_yago.py \
-  --input /home/masaki/hierarchical-repr/EntityTree/input/tree_yago_300people.jsonl \
-  --output /home/masaki/hierarchical-repr/EntityTree/input/tree_yago_300people_annotated.jsonl
+  --input /home/masaki/hierarchical-repr/EntityTree/input/taxonomy_person_test50.jsonl \
+  --output /home/masaki/hierarchical-repr/EntityTree/input/taxonomy_person_test50_annotated.jsonl
 """
 
 import argparse

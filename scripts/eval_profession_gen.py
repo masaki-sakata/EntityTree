@@ -2,25 +2,28 @@
 """
 Evaluate Llama 3 8B (base) and GPT-2 on occupation generation
 from natural-language prompts, and score vs gold labels.
-- No accelerate required
-- No device_map usage
-- Explicit model.to("cuda:N") placement
-- DEBUG: print prompt used for each prediction
+
+Changes:
+- Read gold dataset from an external JSONL into a pandas DataFrame.
+- Use only rows with is_entity == true.
+- For each entity, pick one gold label from edges[*].target_label
+  restricted to the 6 target occupations, using a fixed priority order.
+- Keep: no accelerate, no device_map, explicit model.to("cuda:N"),
+  DEBUG prints of prompts.
 
 Run examples:
-  python eval_profession_gen.py --cuda 0
-  python eval_profession_gen.py --cuda 1
+  uv run python3 eval_profession_gen.py --jsonl /home/masaki/hierarchical-repr/EntityTree/input/300people/tr80_te20/test60.jsonl --cuda 3
+  uv run python3 eval_profession_gen.py --jsonl /home/masaki/hierarchical-repr/EntityTree/input/300people/test50.jsonl --cuda 3
 
-Requirements:
-  pip install transformers torch pandas
 """
 
 from dataclasses import dataclass
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import pandas as pd
 import torch
 import argparse
+import json
 
 from transformers import (
     AutoModelForCausalLM,
@@ -38,39 +41,16 @@ TEMPERATURE = 0.1
 DEFAULT_CUDA_DEVICE = 0
 
 # ----------------------------
-# Dataset (gold)
+# Labels (fixed 6 classes)
 # ----------------------------
-DATA = {
-    "Politician": [
-        "Barack Obama","Margaret Thatcher","Winston Churchill",
-        "Nelson Mandela","Franklin D. Roosevelt","Abraham Lincoln",
-        "John F. Kennedy","Angela Merkel","Mahatma Gandhi"
-    ],
-    "Actor": [
-        "Meryl Streep","Denzel Washington","Tom Hanks",
-        "Leonardo DiCaprio","Marilyn Monroe","Robert De Niro",
-        "Audrey Hepburn","Morgan Freeman","Charlie Chaplin"
-    ],
-    "Athlete": [
-        "Michael Jordan","Lionel Messi","Usain Bolt",
-        "Serena Williams","Muhammad Ali","Tiger Woods",
-        "Cristiano Ronaldo","Babe Ruth"
-    ],
-    "Musician": [
-        "John Lennon","Michael Jackson","Madonna","Bob Dylan",
-        "Elvis Presley","Aretha Franklin","Mozart","Beyoncé"
-    ],
-    "Scientist": [
-        "Albert Einstein","Marie Curie","Isaac Newton","Charles Darwin",
-        "Nikola Tesla","Stephen Hawking","Galileo Galilei","Ada Lovelace"
-    ],
-    "Business Person": [
-        "Steve Jobs","Bill Gates","Warren Buffett","Elon Musk",
-        "Jeff Bezos","Henry Ford","Walt Disney","Oprah Winfrey"
-    ],
-}
-LABELS = list(DATA.keys())
-GOLD: Dict[str, str] = {n: lab for lab, names in DATA.items() for n in names}
+LABELS: List[str] = [
+    "Politician",
+    "Actor",
+    "Athlete",
+    "Musician",
+    "Scientist",
+    "Business Person",
+]
 
 # ----------------------------
 # Natural-language prompts (English)
@@ -121,18 +101,6 @@ def normalize_label(text: str, preferred_lab: Optional[str] = None) -> Optional[
     Normalize a free-form text into one of the 6 labels.
     Priority rule: check the preferred label (e.g., the gold label) first,
     then fall back to the remaining labels in the original LABELS order.
-
-    Order of checks within each label:
-      1) explicit label name match (word boundary)
-      2) synonym match (word boundary)
-      3) strict head-phrase match (before punctuation)
-
-    Args:
-        text: generated text to be normalized
-        preferred_lab: if provided and valid, this label is checked first
-
-    Returns:
-        One of LABELS or None if no match was found.
     """
     if not text:
         return None
@@ -165,6 +133,52 @@ def normalize_label(text: str, preferred_lab: Optional[str] = None) -> Optional[
             return lab
 
     return None
+
+
+# ----------------------------
+# Load gold from JSONL
+# ----------------------------
+def load_gold_from_jsonl(jsonl_path: str) -> Tuple[List[str], Dict[str, str], pd.DataFrame]:
+    """
+    Read a JSONL file containing nodes and edges, keep only is_entity==true rows,
+    and construct a name->label mapping using `edges[*].target_label` restricted
+    to the fixed LABELS. If multiple of the 6 labels appear, choose by LABELS order.
+
+    Returns:
+        names: list of entity names (wiki_title)
+        gold_map: dict mapping name -> gold label (one of LABELS)
+        df_entities: filtered dataframe with columns [wiki_title, gold]
+    """
+    # Load as DataFrame
+    df = pd.read_json(jsonl_path, lines=True)
+
+    # Keep only entities
+    df = df[df.get("is_entity", False) == True].copy()
+
+    # Helper: choose a single label among LABELS, by fixed priority
+    def choose_label(edges: Optional[List[dict]]) -> Optional[str]:
+        if not isinstance(edges, list):
+            return None
+        # Gather the set of valid labels present for this entity
+        present = {e.get("target_label") for e in edges if isinstance(e, dict)}
+        present &= set(LABELS)
+        if not present:
+            return None
+        # Deterministic priority: LABELS order
+        for lab in LABELS:
+            if lab in present:
+                return lab
+        return None
+
+    df["gold"] = df["edges"].apply(choose_label)
+    df = df[df["gold"].notna()].copy()
+
+    # Build mapping: name -> gold
+    df["name"] = df["wiki_title"].astype(str)
+    gold_map = dict(zip(df["name"], df["gold"]))
+    names = list(gold_map.keys())
+
+    return names, gold_map, df[["name", "gold"]].reset_index(drop=True)
 
 
 # ----------------------------
@@ -214,7 +228,7 @@ class ModelResult:
     model: str
     name: str
     gold: str
-    prompt: str   # <-- added
+    prompt: str   # DEBUG: prompt used
     raw: str
     pred: Optional[str]
     correct: bool
@@ -252,8 +266,22 @@ def ask_and_parse(name: str, gold: str, generator, idx: int) -> ModelResult:
 # ----------------------------
 # Evaluation loop
 # ----------------------------
-def run_eval(cuda_index: Optional[int]):
-    names = list(GOLD.keys())
+def run_eval(jsonl_path: str, cuda_index: Optional[int]):
+    # Load gold from JSONL
+    try:
+        names, GOLD, gold_df = load_gold_from_jsonl(jsonl_path)
+    except Exception as e:
+        print(f"[ERROR] Failed to load JSONL '{jsonl_path}': {e}")
+        return
+
+    if not names:
+        print(f"[ERROR] No usable entities found in '{jsonl_path}'. "
+              f"Make sure rows with is_entity==true have edges with one of {LABELS}.")
+        return
+
+    print(f"[INFO] Loaded {len(names)} entities with gold labels from {jsonl_path}.")
+    # Optional peek
+    print(gold_df.head(10).to_string(index=False))
 
     llama_gen = load_generator(LLAMA_MODEL_ID, cuda_index)
     gpt2_gen = load_generator(GPT2_MODEL_ID, cuda_index)
@@ -299,7 +327,9 @@ def run_eval(cuda_index: Optional[int]):
 # ----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--jsonl", type=str, required=True,
+                        help="Path to JSONL dataset (see README).")
     parser.add_argument("--cuda", type=int, default=None,
                         help="CUDA device index to use (e.g., 0 or 1). If omitted, uses DEFAULT_CUDA_DEVICE or CPU.")
     args = parser.parse_args()
-    run_eval(cuda_index=args.cuda)
+    run_eval(jsonl_path=args.jsonl, cuda_index=args.cuda)

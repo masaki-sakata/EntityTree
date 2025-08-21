@@ -34,6 +34,7 @@ from scipy.stats import spearmanr
 from tqdm import tqdm
 import unicodedata
 import re
+from IPython import embed
 
 
 # ================================================================
@@ -320,117 +321,117 @@ def build_node_title_lookup(nodes: List[str], node_titles: List[str], tree_struc
     return node_to_title
 
 
-def compute_centroid_embeddings(embeddings: torch.Tensor, 
-                               nodes: List[str], 
-                               node_titles: List[str],
-                               tree_structure: Dict,
-                               gold_structure: Dict) -> Tuple[torch.Tensor, List[str], List[str], Dict]:
-    """
-    Compute centroid embeddings for category nodes using gold structure.
-    Category nodes are represented as the average of their descendant leaf (entity) embeddings.
-    """
-    debug_info: Dict = {}
+# def compute_centroid_embeddings(embeddings: torch.Tensor, 
+#                                nodes: List[str], 
+#                                node_titles: List[str],
+#                                tree_structure: Dict,
+#                                gold_structure: Dict) -> Tuple[torch.Tensor, List[str], List[str], Dict]:
+#     """
+#     Compute centroid embeddings for category nodes using gold structure.
+#     Category nodes are represented as the average of their descendant leaf (entity) embeddings.
+#     """
+#     debug_info: Dict = {}
     
-    # Use gold structure to determine entity vs category nodes
-    entity_nodes = set(gold_structure.get('entity_nodes', []))
-    category_nodes = set(gold_structure.get('category_nodes', []))
+#     # Use gold structure to determine entity vs category nodes
+#     entity_nodes = set(gold_structure.get('entity_nodes', []))
+#     category_nodes = set(gold_structure.get('category_nodes', []))
     
-    # Build title lookup
-    node_to_title = build_node_title_lookup(nodes, node_titles, tree_structure)
+#     # Build title lookup
+#     node_to_title = build_node_title_lookup(nodes, node_titles, tree_structure)
     
-    # Map from node_id to its index in the provided `nodes` list
-    node_to_idx = {node_id: idx for idx, node_id in enumerate(nodes)}
+#     # Map from node_id to its index in the provided `nodes` list
+#     node_to_idx = {node_id: idx for idx, node_id in enumerate(nodes)}
     
-    # Cache embeddings for entity nodes that exist in the current layer's embedding matrix
-    node_embeddings: Dict[str, torch.Tensor] = {}
-    for node_id in entity_nodes:
-        if node_id in node_to_idx:
-            idx = node_to_idx[node_id]
-            node_embeddings[node_id] = embeddings[idx]
+#     # Cache embeddings for entity nodes that exist in the current layer's embedding matrix
+#     node_embeddings: Dict[str, torch.Tensor] = {}
+#     for node_id in entity_nodes:
+#         if node_id in node_to_idx:
+#             idx = node_to_idx[node_id]
+#             node_embeddings[node_id] = embeddings[idx]
     
-    # Build parent-child relationships from gold structure
-    parent_to_children: Dict[str, List[str]] = defaultdict(list)
-    for parent, child in gold_structure['edges']:
-        parent_to_children[parent].append(child)
+#     # Build parent-child relationships from gold structure
+#     parent_to_children: Dict[str, List[str]] = defaultdict(list)
+#     for parent, child in gold_structure['edges']:
+#         parent_to_children[parent].append(child)
     
-    # Iteratively collect all descendant entity nodes for a given node (cycle-safe)
-    def get_entity_descendants(node_id: str) -> List[str]:
-        if node_id in entity_nodes:
-            return [node_id]
+#     # Iteratively collect all descendant entity nodes for a given node (cycle-safe)
+#     def get_entity_descendants(node_id: str) -> List[str]:
+#         if node_id in entity_nodes:
+#             return [node_id]
         
-        descendants = []
-        visited = set()
-        queue = deque([node_id])
+#         descendants = []
+#         visited = set()
+#         queue = deque([node_id])
         
-        while queue:
-            current = queue.popleft()
-            if current in visited:
-                continue
-            visited.add(current)
+#         while queue:
+#             current = queue.popleft()
+#             if current in visited:
+#                 continue
+#             visited.add(current)
             
-            if current in entity_nodes:
-                descendants.append(current)
-            else:
-                # Add children to queue
-                for child in parent_to_children[current]:
-                    if child not in visited:
-                        queue.append(child)
+#             if current in entity_nodes:
+#                 descendants.append(current)
+#             else:
+#                 # Add children to queue
+#                 for child in parent_to_children[current]:
+#                     if child not in visited:
+#                         queue.append(child)
         
-        return descendants
+#         return descendants
     
-    # Compute centroids for each category node from its descendant entities
-    DEBUG_SAMPLE_N = 3
-    for cat_node in category_nodes:
-        descendants = get_entity_descendants(cat_node)
-        valid_descendants = [d for d in descendants if d in node_to_idx]
+#     # Compute centroids for each category node from its descendant entities
+#     DEBUG_SAMPLE_N = 3
+#     for cat_node in category_nodes:
+#         descendants = get_entity_descendants(cat_node)
+#         valid_descendants = [d for d in descendants if d in node_to_idx]
         
-        if valid_descendants:
-            descendant_embeddings = [embeddings[node_to_idx[d]] for d in valid_descendants]
-            centroid = torch.stack(descendant_embeddings).mean(dim=0)
-            node_embeddings[cat_node] = centroid
+#         if valid_descendants:
+#             descendant_embeddings = [embeddings[node_to_idx[d]] for d in valid_descendants]
+#             centroid = torch.stack(descendant_embeddings).mean(dim=0)
+#             node_embeddings[cat_node] = centroid
             
-            # Debug info
-            cat_title = node_to_title.get(cat_node, cat_node)
-            sample_list: List[str] = []
-            for d in valid_descendants[:DEBUG_SAMPLE_N]:
-                title = node_to_title.get(d, d)
-                sample_list.append(f"{title} ({d})")
-            if len(valid_descendants) > DEBUG_SAMPLE_N:
-                sample_list.append(f"... and {len(valid_descendants) - DEBUG_SAMPLE_N} more")
+#             # Debug info
+#             cat_title = node_to_title.get(cat_node, cat_node)
+#             sample_list: List[str] = []
+#             for d in valid_descendants[:DEBUG_SAMPLE_N]:
+#                 title = node_to_title.get(d, d)
+#                 sample_list.append(f"{title} ({d})")
+#             if len(valid_descendants) > DEBUG_SAMPLE_N:
+#                 sample_list.append(f"... and {len(valid_descendants) - DEBUG_SAMPLE_N} more")
             
-            print(f"\n[DEBUG] Category '{cat_title}' (ID: {cat_node}):")
-            print(f"  - Computed centroid from {len(valid_descendants)} entities")
-            print(f"  - Sample entities: {sample_list}")
+#             print(f"\n[DEBUG] Category '{cat_title}' (ID: {cat_node}):")
+#             print(f"  - Computed centroid from {len(valid_descendants)} entities")
+#             print(f"  - Sample entities: {sample_list}")
             
-            debug_info[cat_node] = {
-                'title': cat_title,
-                'num_descendants': len(valid_descendants),
-                'sample_descendants': sample_list
-            }
+#             debug_info[cat_node] = {
+#                 'title': cat_title,
+#                 'num_descendants': len(valid_descendants),
+#                 'sample_descendants': sample_list
+#             }
     
-    # Assemble outputs in the original node order, keeping only nodes we computed
-    result_nodes: List[str] = []
-    result_titles: List[str] = []
-    result_embeddings: List[torch.Tensor] = []
+#     # Assemble outputs in the original node order, keeping only nodes we computed
+#     result_nodes: List[str] = []
+#     result_titles: List[str] = []
+#     result_embeddings: List[torch.Tensor] = []
     
-    for node_id in nodes:
-        if node_id in node_embeddings:
-            result_nodes.append(node_id)
-            result_titles.append(node_to_title.get(node_id, node_id))
-            result_embeddings.append(node_embeddings[node_id])
+#     for node_id in nodes:
+#         if node_id in node_embeddings:
+#             result_nodes.append(node_id)
+#             result_titles.append(node_to_title.get(node_id, node_id))
+#             result_embeddings.append(node_embeddings[node_id])
     
-    # Stack to tensor (K, D) or empty if nothing matched
-    if result_embeddings:
-        result_tensor = torch.stack(result_embeddings)
-    else:
-        result_tensor = torch.empty(0, embeddings.shape[1])
+#     # Stack to tensor (K, D) or empty if nothing matched
+#     if result_embeddings:
+#         result_tensor = torch.stack(result_embeddings)
+#     else:
+#         result_tensor = torch.empty(0, embeddings.shape[1])
     
-    print(f"\n[DEBUG] Centroid computation complete:")
-    print(f"  - Original embeddings shape: {embeddings.shape}")
-    print(f"  - Result embeddings shape: {result_tensor.shape}")
-    print(f"  - Nodes with centroids: {len(result_nodes)}")
+#     print(f"\n[DEBUG] Centroid computation complete:")
+#     print(f"  - Original embeddings shape: {embeddings.shape}")
+#     print(f"  - Result embeddings shape: {result_tensor.shape}")
+#     print(f"  - Nodes with centroids: {len(result_nodes)}")
     
-    return result_tensor, result_nodes, result_titles, debug_info
+#     return result_tensor, result_nodes, result_titles, debug_info
 
 
 # ================================================================
@@ -438,90 +439,93 @@ def compute_centroid_embeddings(embeddings: torch.Tensor,
 # ================================================================
 
 def load_embeddings_with_gold(emb_dir: str, layer: int, probe_type: str, gold_structures: Dict) -> List[Dict]:
-    """Load embeddings and compute centroids using gold structure"""
-    
+    """Load embeddings and use precomputed centroids when available (Option A)."""
+
     paths = [os.path.join(emb_dir, f) for f in os.listdir(emb_dir) 
              if f.endswith("_embeddings.pt")]
-    
+
     if not paths:
         print(f"ERROR: no *_embeddings.pt found in {emb_dir}", file=sys.stderr)
         sys.exit(1)
-    
+
     paths.sort()
     print(f"Found {len(paths)} embedding files")
-    
+
     data = []
     for p in tqdm(paths, desc="Loading embeddings"):
+        # Load torch file
         try:
             blob = torch.load(p, map_location="cpu", weights_only=False)
         except TypeError:
             blob = torch.load(p, map_location="cpu")
-        
-        emb = blob["embeddings"]  # (N, L, D)
-        if layer >= emb.shape[1]:
-            raise ValueError(f"Layer {layer} out of range for {p}")
-        
+
+        emb = blob["embeddings"]  # shape: (N, L, D)
         md = blob["metadata"]
         tree_id = md["tree_id"]
+
+        if layer >= emb.shape[1]:
+            raise ValueError(f"Layer {layer} out of range for {p}")
+
         layer_emb = emb[:, layer, :]  # (N, D)
-        
+
+        # Retrieve matching gold structure; if missing, skip this file
+        if tree_id not in gold_structures:
+            print(f"  WARNING: No gold structure for tree_id {tree_id}, skipping")
+            continue
+        gold_structure = gold_structures[tree_id]
+
+        # --- Option A path: use precomputed rows exactly as saved ---
         print(f"\n{'='*60}")
         print(f"Processing: {os.path.basename(p)}")
         print(f"  Tree ID: {tree_id}")
-        
-        # Get corresponding gold structure
-        if tree_id not in gold_structures:
-            print(f"  WARNING: No gold structure found for tree_id {tree_id}, skipping")
-            continue
-        
-        gold_structure = gold_structures[tree_id]
-        
-        # Compute centroid embeddings using gold structure
-        centroid_emb, centroid_nodes, centroid_titles, debug_info = compute_centroid_embeddings(
-            layer_emb, 
-            md['nodes'], 
-            md['node_titles'],
-            md.get('tree_structure'),
-            gold_structure
-        )
-        
-        if centroid_emb.shape[0] == 0:
-            print(f"  WARNING: No valid embeddings computed for tree {tree_id}, skipping")
-            continue
-        
-        # Compute gold distances and depths
-        gold_distances = compute_gold_distances(gold_structure)
-        gold_depths = compute_gold_depths(gold_structure)
-        
-        # Create distance/depth matrices for the centroid nodes
-        node_to_idx = {node_id: idx for idx, node_id in enumerate(centroid_nodes)}
+        print("  Mode: using PRECOMPUTED centroids from extractor")
+
+        nodes_all: List[str] = md["nodes"]
+        titles_all: List[str] = md["node_titles"]
+
+        # Optional safety filter: keep only nodes that appear in gold structure.
+        # This prevents building gold matrices with unknown ids.
+        gold_nodes = set(gold_structure.get("nodes", {}).keys())
+        keep_idx: List[int] = [i for i, nid in enumerate(nodes_all) if nid in gold_nodes]
+
+        if not keep_idx:
+            # If nothing matches (unlikely), fall back to using all rows.
+            print("  WARNING: no overlap with gold nodes; keeping all saved rows")
+            keep_idx = list(range(len(nodes_all)))
+
+        centroid_emb  = layer_emb[keep_idx, :]                   # (K, D)
+        centroid_nodes  = [nodes_all[i]  for i in keep_idx]      # List[str]
+        centroid_titles = [titles_all[i] for i in keep_idx]      # List[str]
+        debug_info = {"mode": "precomputed"}
+
+        # ---- Build gold distance / depth targets restricted to centroid_nodes ----
+        # Precompute gold distances/depths for the current tree
+        gold_distances = compute_gold_distances(gold_structure)  # Dict[(id,id)] -> dist
+        gold_depths    = compute_gold_depths(gold_structure)     # Dict[id] -> depth
+
+        # Build NxN distance matrix aligned to centroid_nodes
         N = len(centroid_nodes)
-        
+        node_to_idx = {node_id: idx for idx, node_id in enumerate(centroid_nodes)}
+
         if probe_type == 'distance':
-            # Build gold distance matrix
-            distance_matrix = torch.full((N, N), float('inf'))
-            for i, node_i in enumerate(centroid_nodes):
-                for j, node_j in enumerate(centroid_nodes):
-                    dist = gold_distances.get((node_i, node_j), float('inf'))
-                    distance_matrix[i, j] = dist
-            
-            entry_distances = distance_matrix
+            dist_mat = torch.full((N, N), float('inf'))
+            for i, ni in enumerate(centroid_nodes):
+                for j, nj in enumerate(centroid_nodes):
+                    d = gold_distances.get((ni, nj), float('inf'))
+                    dist_mat[i, j] = d
         else:
-            entry_distances = None
-        
+            dist_mat = None
+
         if probe_type == 'depth':
-            # Build gold depth vector
-            depth_vector = torch.full((N,), -1.0)
-            for i, node_id in enumerate(centroid_nodes):
-                if node_id in gold_depths:
-                    depth_vector[i] = gold_depths[node_id]
-            
-            entry_depths = depth_vector
+            depth_vec = torch.full((N,), -1.0)
+            for i, nid in enumerate(centroid_nodes):
+                if nid in gold_depths:
+                    depth_vec[i] = float(gold_depths[nid])
         else:
-            entry_depths = None
-        
+            depth_vec = None
+
         entry = {
-            "embeddings": centroid_emb,
+            "embeddings": centroid_emb,          # (K, D)
             "nodes": centroid_nodes,
             "node_titles": centroid_titles,
             "tree_id": tree_id,
@@ -529,15 +533,15 @@ def load_embeddings_with_gold(emb_dir: str, layer: int, probe_type: str, gold_st
             "centroid_debug": debug_info,
             "gold_structure": gold_structure
         }
-        
-        if entry_distances is not None:
-            entry['distances'] = entry_distances
-        if entry_depths is not None:
-            entry['depths'] = entry_depths
-        
+        if dist_mat is not None:
+            entry["distances"] = dist_mat
+        if depth_vec is not None:
+            entry["depths"] = depth_vec
+
+        print(f"  Prepared {len(centroid_nodes)} nodes (after filtering/alignment)")
         data.append(entry)
-        print(f"  Loaded with {len(centroid_nodes)} nodes and gold structure")
-    
+        embed()
+
     return data
 
 

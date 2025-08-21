@@ -145,14 +145,12 @@ def load_gold_structures(jsonl_path: str) -> Dict[int, Dict]:
 def build_acyclic_hierarchy(tree_structure: Dict) -> Dict:
     """
     Build an acyclic hierarchy by removing cycles and determining proper parent-child relationships.
-    Uses entity count heuristic to resolve cycles between categories.
+    Uses entity vs category information to infer the correct hierarchy direction.
     """
     nodes = tree_structure['nodes']
     edges = tree_structure['edges']
     entity_nodes = set(tree_structure['entity_nodes'])
     category_nodes = set(tree_structure['category_nodes'])
-    
-    print(f"\n  Building hierarchy for tree with {len(nodes)} nodes")
     
     # Build adjacency lists
     adj = defaultdict(set)
@@ -161,113 +159,70 @@ def build_acyclic_hierarchy(tree_structure: Dict) -> Dict:
         adj[parent].add(child)
         reverse_adj[child].add(parent)
     
-    # Count direct entity children for each category
-    entity_count = {}
-    for cat in category_nodes:
-        count = sum(1 for child in adj[cat] if child in entity_nodes)
-        entity_count[cat] = count
-        print(f"    Category {nodes[cat]['title']} ({cat}) has {count} direct entities")
-    
-    # Detect and resolve cycles between categories
+    # Strategy: Build hierarchy top-down, prioritizing category -> entity edges
     valid_edges = []
-    removed_edges = []
+    visited = set()
     
-    # First, keep all category->entity edges (these don't create cycles)
-    for parent, child in edges:
-        if parent in category_nodes and child in entity_nodes:
-            valid_edges.append((parent, child))
+    # Find root candidates (category nodes that don't point to other categories "upward")
+    root_candidates = []
+    for node in category_nodes:
+        has_category_parent = any(p in category_nodes for p in reverse_adj[node])
+        if not has_category_parent:
+            root_candidates.append(node)
     
-    # Then handle category->category edges
-    category_edges = [(p, c) for p, c in edges 
-                      if p in category_nodes and c in category_nodes]
+    # If no clear root, pick the first category node
+    if not root_candidates and category_nodes:
+        root_candidates = [list(category_nodes)[0]]
     
-    # Build graph of only category nodes to detect cycles
-    cat_graph = defaultdict(set)
-    for parent, child in category_edges:
-        cat_graph[parent].add(child)
+    root_node = root_candidates[0] if root_candidates else None
     
-    # Function to detect if adding an edge creates a cycle
-    def creates_cycle(graph, parent, child):
-        """Check if adding parent->child creates a cycle using DFS"""
-        visited = set()
-        stack = [child]
-        while stack:
-            node = stack.pop()
-            if node == parent:
-                return True
-            if node in visited:
-                continue
-            visited.add(node)
-            stack.extend(graph.get(node, []))
-        return False
-    
-    # Process category edges, checking for cycles
-    clean_cat_graph = defaultdict(set)
-    for parent, child in category_edges:
-        if creates_cycle(clean_cat_graph, parent, child):
-            # Cycle detected! Use entity count heuristic
-            parent_entities = entity_count.get(parent, 0)
-            child_entities = entity_count.get(child, 0)
+    def dfs_build_tree(current, path):
+        """Build tree using DFS, avoiding cycles"""
+        if current in path:  # Cycle detected
+            return
+        
+        if current in visited:
+            return
             
-            print(f"    Cycle detected: {nodes[parent]['title']} ({parent_entities} entities) <-> "
-                  f"{nodes[child]['title']} ({child_entities} entities)")
-            
-            # Keep edge only if parent has more entities (or equal, to break ties consistently)
-            if parent_entities >= child_entities:
-                clean_cat_graph[parent].add(child)
-                valid_edges.append((parent, child))
-                print(f"      Keeping edge: {nodes[parent]['title']} -> {nodes[child]['title']}")
-            else:
-                removed_edges.append((parent, child))
-                print(f"      Removing edge: {nodes[parent]['title']} -> {nodes[child]['title']}")
-        else:
-            # No cycle, keep the edge
-            clean_cat_graph[parent].add(child)
-            valid_edges.append((parent, child))
-    
-    # Find root node: category with no parents after cycle removal
-    all_children = set()
-    all_parents = set()
-    for parent, child in valid_edges:
-        if parent in category_nodes:
-            all_parents.add(parent)
-        if child in category_nodes:
-            all_children.add(child)
-    
-    root_candidates = category_nodes - all_children
-    
-    if root_candidates:
-        # Choose the candidate with most descendants
-        best_root = None
-        max_descendants = -1
-        for candidate in root_candidates:
-            # Count all descendants using BFS
-            visited = set()
-            queue = deque([candidate])
-            while queue:
-                node = queue.popleft()
-                if node in visited:
+        visited.add(current)
+        new_path = path | {current}
+        
+        # Add edges from current node to its children
+        for child in adj[current]:
+            # Prefer category -> entity edges, avoid cycles
+            if child not in path:
+                if current in category_nodes and child in entity_nodes:
+                    # Category to entity - always valid
+                    valid_edges.append((current, child))
+                    dfs_build_tree(child, new_path)
+                elif current in category_nodes and child in category_nodes:
+                    # Category to category - check if it creates proper hierarchy
+                    valid_edges.append((current, child))
+                    dfs_build_tree(child, new_path)
+                elif current in entity_nodes:
+                    # Entities shouldn't have children in a typical taxonomy
                     continue
-                visited.add(node)
-                for child in clean_cat_graph.get(node, []):
-                    queue.append(child)
-            descendant_count = len(visited) - 1
-            if descendant_count > max_descendants:
-                max_descendants = descendant_count
-                best_root = candidate
-        root_node = best_root
-    else:
-        # Fallback: pick the first category node
-        root_node = list(category_nodes)[0] if category_nodes else None
     
-    print(f"    Selected root: {nodes[root_node]['title'] if root_node else 'None'} ({root_node})")
+    # Build tree starting from root
+    if root_node:
+        dfs_build_tree(root_node, set())
+    
+    # Add any disconnected entities as direct children of their category parents
+    for entity in entity_nodes:
+        if entity not in visited:
+            # Find its category parent(s)
+            for parent in reverse_adj[entity]:
+                if parent in category_nodes and parent in visited:
+                    valid_edges.append((parent, entity))
+                    visited.add(entity)
+                    break
     
     # Update structure
     tree_structure['edges'] = valid_edges
     tree_structure['root_node'] = root_node
     
-    print(f"    Removed {len(removed_edges)} edges to eliminate cycles")
-    print(f"    Final hierarchy: {len(valid_edges)} edges")
+    print(f"    Removed {len(edges) - len(valid_edges)} edges to eliminate cycles")
+    print(f"    Final hierarchy: {len(valid_edges)} edges, root: {root_node}")
     
     return tree_structure
 
@@ -776,7 +731,7 @@ def evaluate_depth_probe_correct(probe, dataset, device):
 
 
 # ================================================================
-# Visualization (updated with better root positioning)
+# Visualization (unchanged)
 # ================================================================
 
 def _canon_label(s: Optional[str]) -> str:
@@ -969,7 +924,7 @@ function orientUndirectedToRoot(edgesUndirected, rootIndex) {{
 
 function buildHierarchy(nodes, directedEdges, rootIndex) {{
   console.log('Building hierarchy for root index:', rootIndex);
-  console.log('Number of directed edges:', directedEdges.length);
+  console.log('Directed edges:', directedEdges);
   
   // Create node map
   const nodeMap = new Map();
@@ -1075,49 +1030,55 @@ function drawCard(record) {{
     const directed = edgesFor(mode);
     const hierarchy = buildHierarchy(record.nodes, directed, record.root_index);
 
-    // Create tree layout - FORCE vertical orientation
-    const treeLayout = d3.tree()
-      .nodeSize([NODE_SPACING, LEVEL_SEP]);  // Width between siblings, height between levels
+    // Create tree layout with fixed root at top
+    const tree = d3.tree()
+      .size([800, 600])  // Fixed size to ensure consistent layout
+      .separation((a, b) => (a.parent === b.parent ? 1 : 2));
     
-    treeLayout(hierarchy);
+    tree(hierarchy);
 
     const nodes = hierarchy.descendants();
     const links = hierarchy.links();
     
     console.log('Tree nodes count:', nodes.length);
-    console.log('Root position:', {{x: hierarchy.x, y: hierarchy.y}});
+    console.log('Root node depth:', hierarchy.depth);
 
-    // Calculate bounds to determine SVG size
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
+    // Force root to be at the top (y=0) and normalize coordinates
+    if (nodes.length > 0) {{
+      const rootNode = nodes[0]; // Root is always first in descendants
+      const offsetY = rootNode.y;
+      
+      // Normalize all Y coordinates so root is at 0
+      nodes.forEach(d => {{
+        d.y = d.y - offsetY;
+      }});
+    }}
+
+    // Calculate layout dimensions
+    const xExtent = d3.extent(nodes, d => d.x);
+    const yExtent = d3.extent(nodes, d => d.y);
+    const xSpan = (xExtent[1] - xExtent[0]) || 400;
+    const ySpan = (yExtent[1] - yExtent[0]) || 300;
     
-    nodes.forEach(d => {{
-      minX = Math.min(minX, d.x);
-      maxX = Math.max(maxX, d.x);
-      minY = Math.min(minY, d.y);
-      maxY = Math.max(maxY, d.y);
-    }});
-
-    const width = Math.max(1000, (maxX - minX) + MARGIN.left + MARGIN.right + 100);
-    const height = Math.max(MIN_HEIGHT, (maxY - minY) + MARGIN.top + MARGIN.bottom + 100);
+    const width = Math.max(1000, xSpan + MARGIN.left + MARGIN.right + 200);
+    const height = Math.max(MIN_HEIGHT, ySpan + MARGIN.top + MARGIN.bottom + 200);
 
     svg.attr('width', width).attr('height', height);
     bg.attr('width', width).attr('height', height);
 
-    // Transform to center the tree and ensure root is at top
-    const centerX = width / 2;
-    const startY = MARGIN.top;
-    
-    // Apply translation to center horizontally and position root at top
-    nodes.forEach(d => {{
-      d.displayX = d.x + centerX;
-      d.displayY = d.y - minY + startY;  // Normalize so root is at startY
-    }});
+    // Create scales with root guaranteed at top
+    const xScale = d3.scaleLinear()
+      .domain([xExtent[0] - 50, xExtent[1] + 50])
+      .range([MARGIN.left, width - MARGIN.right]);
+      
+    const yScale = d3.scaleLinear()
+      .domain([yExtent[0] - 30, yExtent[1] + 30])
+      .range([MARGIN.top, height - MARGIN.bottom]);
 
-    // Draw links using Bezier curves
+    // Draw links
     const linkGenerator = d3.linkVertical()
-      .x(d => d.displayX)
-      .y(d => d.displayY);
+      .x(d => xScale(d.x))
+      .y(d => yScale(d.y));
 
     gLinks.selectAll('path').data(links)
       .join('path')
@@ -1135,43 +1096,39 @@ function drawCard(record) {{
     nodeEnter.append('circle')
       .attr('r', d => d.data.is_leaf ? 6 : (d.data.is_root ? 10 : 8))
       .attr('fill', d => {{
-        if (d.data.is_root) return '#ff6b6b';  // Red for root
         return d.data.is_leaf ? (pal.get(d.data.occupation) || '#999') : '#444';
       }})
-      .attr('stroke-width', d => d.data.is_root ? 2 : 0.6)
       .on('mousemove', (event, d) => {{
-        const depth = d.depth;
-        const html = `<b>${{d.data.title}}</b><br/>ID: ${{d.data.id}}<br/>Depth: ${{depth}}${{d.data.is_leaf ? `<br/>Occupation: ${{d.data.occupation||'Unknown'}}` : ''}}${{d.data.is_root ? '<br/><b style="color:#ff6b6b">ROOT NODE</b>' : ''}}`;
+        const html = `<b>${{d.data.title}}</b><br/>ID: ${{d.data.id}}${{d.data.is_leaf ? `<br/>Occupation: ${{d.data.occupation||'Unknown'}}` : ''}}${{d.data.is_root ? '<br/><b>ROOT NODE</b>' : ''}}`;
         showTip(html, event.pageX, event.pageY);
       }})
       .on('mouseout', hideTip);
 
     nodeEnter.append('text')
-      .attr('dy', d => d.data.is_leaf ? 20 : -14)
+      .attr('dy', -14)
       .attr('text-anchor', 'middle')
       .text(d => d.data.title)
-      .attr('fill', d => d.data.is_root ? '#ff6b6b' : '#222')
+      .attr('fill', '#222')
       .attr('font-size', d => d.data.is_root ? '14px' : (d.data.is_leaf ? '10px' : '11px'))
       .attr('font-weight', d => d.data.is_root ? 'bold' : (d.data.is_leaf ? 'normal' : '600'));
 
     nodeSelection.merge(nodeEnter)
-      .attr('transform', d => `translate(${{d.displayX}}, ${{d.displayY}})`);
+      .attr('transform', d => `translate(${{xScale(d.x)}}, ${{yScale(d.y)}})`);
 
     nodeSelection.exit().remove();
 
-    // Auto-fit view with some padding
+    // Auto-fit view
     setTimeout(() => {{
       try {{
         const bbox = container.node().getBBox();
         if (bbox && bbox.width && bbox.height) {{
-          const padding = 50;
           const scale = Math.min(
-            (width - padding * 2) / bbox.width,
-            (height - padding * 2) / bbox.height,
-            1.5  // Don't zoom in too much
+            (width - 100) / bbox.width,
+            (height - 100) / bbox.height,
+            SCALE_EXTENT[1]
           );
           const translateX = (width - bbox.width * scale) / 2 - bbox.x * scale;
-          const translateY = padding;  // Keep some top padding
+          const translateY = (height - bbox.height * scale) / 2 - bbox.y * scale;
           
           const transform = d3.zoomIdentity.translate(translateX, translateY).scale(scale);
           svg.transition().duration(500).call(zoom.transform, transform);

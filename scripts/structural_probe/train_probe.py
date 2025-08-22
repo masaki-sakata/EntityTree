@@ -356,7 +356,7 @@ def parse_args():
     pa.add_argument('--seed', type=int, default=42)
     pa.add_argument('--glob', default='*_split_*_embeddings.pt',
                     help='Glob under embedding_dir to pick training files (default: *_split_*_embeddings.pt)')
-    pa.add_argument('--eval_every', type=int, default=10, help='Evaluate on train set every K epochs')
+    pa.add_argument('--eval_every', type=int, default=100, help='Evaluate on train set every K epochs')
     pa.add_argument('--no_eval', action='store_true', help='Disable periodic evaluation')
     return pa.parse_args()
 

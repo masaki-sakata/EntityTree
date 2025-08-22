@@ -30,6 +30,10 @@ def parse_args():
     parser.add_argument('--output_dir', type=str, required=True,
                         help='Directory to save the embeddings')
 
+    # New: explicit run mode
+    parser.add_argument('--run_mode', choices=['train', 'test'], required=True,
+                        help='Execution mode: train or test')
+
     # Model configuration
     parser.add_argument('--model_type', choices=['hf', 'fasttext'], default='hf',
                         help='hf: HuggingFace Transformer\n'
@@ -39,13 +43,21 @@ def parse_args():
     parser.add_argument('--vector_path', type=str, default=None,
                         help='Path to fastText .bin file (required when --model_type fasttext)')
 
-    # Tree splitting option
+    # Tree splitting option (train only)
     parser.add_argument('--split_tree', action='store_true',
-                        help='Split the tree into multiple trees with one entity per category')
+                        help='Split the tree into multiple trees with one entity per category (train mode only)')
     parser.add_argument('--num_splits', type=int, default=None,
                         help='Number of tree splits to generate (default: all possible combinations for small trees)')
     parser.add_argument('--random_seed', type=int, default=42,
                         help='Random seed for tree splitting')
+
+    # New: centroid recomputation source for test mode
+    parser.add_argument('--centroid_data_path', type=str, default=None,
+                        help='Path to the GOLD (train) JSONL used to recompute category/root centroids in test mode')
+
+    # New: policy for missing categories in test vs. train centroids
+    parser.add_argument('--missing_category_policy', type=str, choices=['error', 'root', 'skip'], default='error',
+                        help='How to handle test categories missing from train centroids: error | root | skip')
 
     # Other settings
     parser.add_argument('--max_length', type=int, default=500,
@@ -61,6 +73,7 @@ def parse_args():
                         help='Enable verbose output for debugging')
 
     return parser.parse_args()
+
 
 
 def load_data(data_path):
@@ -432,6 +445,115 @@ def extract_hidden_states(texts, args, tokenizer, model, device):
     else:
         raise ValueError(f"Unknown model_type: {args.model_type}")
 
+def recompute_centroids_from_data(centroid_data_path, args, tokenizer, model, device, is_verbose=False):
+    """
+    Recompute category/root centroids from GOLD (train) data on-the-fly.
+    This function does NOT use split; it directly aggregates entity embeddings per category.
+
+    Returns:
+        category_centroids: dict[qid] -> tensor [num_layers, hidden_dim]
+        root_centroid: tensor [num_layers, hidden_dim]
+        stats: dict with counts and coverage info
+    """
+    if centroid_data_path is None or not os.path.exists(centroid_data_path):
+        print("[ERROR] --centroid_data_path must be provided and exist in test mode")
+        sys.exit(1)
+
+    # Load GOLD data grouped by tree
+    gold_groups = load_data(centroid_data_path)
+
+    # Aggregators for per-category sum and counts
+    cat_sum = defaultdict(lambda: None)   # qid -> tensor sum
+    cat_cnt = defaultdict(int)            # qid -> count of entity embeddings included
+
+    # For root centroid (global)
+    root_sum = None
+    root_cnt = 0
+
+    total_gold_entities = 0
+    total_gold_categories = set()
+
+    for tree_id, gold_tree in gold_groups.items():
+        # Build structure and classify
+        gold_struct = build_taxonomy_structure(gold_tree, args.text_mode, is_verbose)
+        gold_cls = classify_nodes(gold_struct)
+
+        # Collect entity texts and qids
+        gold_entity_texts, gold_entity_qids = [], []
+        for qid in gold_cls['entities']:
+            if qid in gold_struct['nodes']:
+                gold_entity_texts.append(build_input_text(gold_struct['nodes'][qid], args.text_mode))
+                gold_entity_qids.append(qid)
+
+        # Extract embeddings for GOLD entities
+        if gold_entity_texts:
+            gold_entity_tensor = extract_hidden_states(
+                gold_entity_texts,
+                args=args,
+                tokenizer=tokenizer,
+                model=model,
+                device=device
+            )
+            # Map qid -> embedding [num_layers, hidden_dim]
+            gold_entity_embeds = {qid: gold_entity_tensor[i] for i, qid in enumerate(gold_entity_qids)}
+        else:
+            gold_entity_embeds = {}
+
+        # Aggregate per-category by summing entity embeddings (weighted by entity count)
+        for cat_qid, ent_list in gold_cls['category_entities'].items():
+            total_gold_categories.add(cat_qid)
+            for ent_qid in ent_list:
+                if ent_qid in gold_entity_embeds:
+                    emb = gold_entity_embeds[ent_qid]
+                    if cat_sum[cat_qid] is None:
+                        cat_sum[cat_qid] = emb.clone()
+                    else:
+                        cat_sum[cat_qid] += emb
+                    cat_cnt[cat_qid] += 1
+
+        # Aggregate root
+        for ent_qid in gold_cls['entities']:
+            if ent_qid in gold_entity_embeds:
+                emb = gold_entity_embeds[ent_qid]
+                if root_sum is None:
+                    root_sum = emb.clone()
+                else:
+                    root_sum += emb
+                root_cnt += 1
+
+        total_gold_entities += len(gold_cls['entities'])
+
+    # Build centroids by dividing sum by count
+    category_centroids = {}
+    for cat_qid, s in cat_sum.items():
+        if s is not None and cat_cnt[cat_qid] > 0:
+            category_centroids[cat_qid] = s / cat_cnt[cat_qid]
+
+    if root_sum is None or root_cnt == 0:
+        root_centroid = None
+        print("[WARNING] No root centroid could be computed from GOLD data (no entities available).")
+    else:
+        root_centroid = root_sum / root_cnt
+
+    stats = {
+        'gold_trees': len(gold_groups),
+        'gold_total_entities': total_gold_entities,
+        'gold_total_categories': len(total_gold_categories),
+        'centroid_categories': len(category_centroids),
+        'has_root_centroid': root_centroid is not None
+    }
+
+    if is_verbose:
+        print("\n[DEBUG] Recomputed centroids from GOLD data:")
+        print(f"  GOLD trees: {stats['gold_trees']}")
+        print(f"  GOLD entities: {stats['gold_total_entities']}")
+        print(f"  GOLD categories (unique): {stats['gold_total_categories']}")
+        print(f"  Centroid categories built: {stats['centroid_categories']}")
+        print(f"  Root centroid available: {stats['has_root_centroid']}")
+
+    return category_centroids, root_centroid, stats
+
+
 
 def compute_centroids(entity_embeddings, entity_qids, category_entities):
     """
@@ -562,61 +684,84 @@ def split_taxonomy_tree(tree_structure, node_classification, num_splits=None, ra
     
     return split_trees
 
-
 def build_final_embeddings(tree_structure, node_classification, entity_embeddings, 
-                          category_centroids, root_centroid, selected_entities=None):
+                          category_centroids, root_centroid, selected_entities=None,
+                          missing_category_policy='error'):
     """
-    Build final embedding tensor for a tree using entities and centroids
-    
+    Build final embedding tensor for a tree using entities and (precomputed) centroids.
+
     Args:
         tree_structure: tree structure
         node_classification: node classification
         entity_embeddings: dict of entity embeddings
-        category_centroids: dict of category centroids
-        root_centroid: root node centroid
-        selected_entities: if provided, only include these entities (for split trees)
-    
+        category_centroids: dict of category centroids (from GOLD/train)
+        root_centroid: root centroid (from GOLD/train)
+        selected_entities: optional entity subset (for split trees)
+        missing_category_policy: 'error' | 'root' | 'skip'
+
     Returns:
-        embeddings tensor and ordered node list
+        (embeddings tensor, ordered node list)
     """
     ordered_nodes = []
     ordered_embeddings = []
-    
-    # Determine which nodes to include
+
+    # Decide which nodes to include
     nodes_to_include = set()
-    
-    # Always include root and categories
     nodes_to_include.update(node_classification['root'])
     nodes_to_include.update(node_classification['categories'])
-    
-    # Include entities
+
     if selected_entities is not None:
         nodes_to_include.update(selected_entities)
     else:
         nodes_to_include.update(node_classification['entities'])
-    
-    # Build ordered list
+
+    # Iterate with deterministic order
     for qid in sorted(nodes_to_include):
         if qid not in tree_structure['nodes']:
             continue
-            
-        ordered_nodes.append(qid)
-        
-        # Get appropriate embedding
+
+        # Root nodes
         if qid in node_classification['root']:
+            if root_centroid is None:
+                raise ValueError("Root centroid is None; cannot assign root embedding.")
+            ordered_nodes.append(qid)
             ordered_embeddings.append(root_centroid)
-        elif qid in node_classification['categories']:
-            ordered_embeddings.append(category_centroids[qid])
-        elif qid in entity_embeddings:
+            continue
+
+        # Category nodes (use precomputed centroids from GOLD/train)
+        if qid in node_classification['categories']:
+            if qid in category_centroids:
+                ordered_nodes.append(qid)
+                ordered_embeddings.append(category_centroids[qid])
+            else:
+                # Handle missing categories according to policy
+                if missing_category_policy == 'error':
+                    raise ValueError(f"Missing centroid for category {qid} in test mode.")
+                elif missing_category_policy == 'root':
+                    if root_centroid is None:
+                        raise ValueError(f"Missing centroid for category {qid} and root centroid is None.")
+                    ordered_nodes.append(qid)
+                    ordered_embeddings.append(root_centroid)
+                elif missing_category_policy == 'skip':
+                    # Do not append this category
+                    continue
+                else:
+                    raise ValueError(f"Unknown missing_category_policy: {missing_category_policy}")
+            continue
+
+        # Entity nodes (use test entity embeddings)
+        if qid in entity_embeddings:
+            ordered_nodes.append(qid)
             ordered_embeddings.append(entity_embeddings[qid])
-    
+
     # Stack embeddings
     if ordered_embeddings:
         final_embeddings = torch.stack(ordered_embeddings)
     else:
         final_embeddings = torch.empty(0)
-    
+
     return final_embeddings, ordered_nodes
+
 
 
 def save_embeddings(embeddings_tensor, metadata, output_path):
@@ -636,7 +781,6 @@ def save_embeddings(embeddings_tensor, metadata, output_path):
     print(f"  Tensor dtype: {embeddings_tensor.dtype}")
     print(f"  File size: {os.path.getsize(output_path) / 1024 / 1024:.2f} MB")
 
-
 def main():
     args = parse_args()
 
@@ -648,161 +792,255 @@ def main():
     print(f"Using device: {device} (model_type={args.model_type})")
 
     # FastText validation
-    if args.model_type == 'fasttext':
-        if args.text_mode != 'title':
-            print("[ERROR] fastText only supports text_mode='title'")
-            sys.exit(1)
+    if args.model_type == 'fasttext' and args.text_mode != 'title':
+        print("[ERROR] fastText only supports text_mode='title'")
+        sys.exit(1)
 
     # Output directory
     output_root = os.path.join(args.output_dir, args.text_mode)
     os.makedirs(output_root, exist_ok=True)
     print(f"Embeddings will be saved under: {output_root}")
 
-    # Load data
-    tree_groups = load_data(args.data_path)
-
-    # Load model
+    # Load model/tokenizer ONCE (shared by train/test and centroid recomputation)
     tokenizer, model = load_model_and_tokenizer(args, device)
 
-    # Process each tree
-    for tree_id, tree_data in tree_groups.items():
-        print(f"\n{'='*20} Processing Tree {tree_id} {'='*20}")
+    # ---------------------------
+    # RUN MODE: TRAIN (unchanged)
+    # ---------------------------
+    if args.run_mode == 'train':
+        # Load data
+        tree_groups = load_data(args.data_path)
 
-        # Build tree structure
-        tree_structure = build_taxonomy_structure(tree_data, args.text_mode, args.is_verbose)
-        
-        # Classify nodes
-        node_classification = classify_nodes(tree_structure)
-        
-        print(f"Tree structure:")
-        print(f"  Root nodes: {len(node_classification['root'])}")
-        print(f"  Category nodes: {len(node_classification['categories'])}")
-        print(f"  Entity nodes: {len(node_classification['entities'])}")
-        
-        # Phase 1: Extract embeddings for ALL entities
-        print("\nPhase 1: Extracting entity embeddings...")
-        entity_texts = []
-        entity_qids = []
-        
-        for qid in node_classification['entities']:
-            if qid in tree_structure['nodes']:
-                entity_texts.append(build_input_text(tree_structure['nodes'][qid], args.text_mode))
-                entity_qids.append(qid)
-        
-        if entity_texts:
-            entity_embeddings_tensor = extract_hidden_states(
-                entity_texts,
-                args=args,
-                tokenizer=tokenizer,
-                model=model,
-                device=device
+        # Process each tree
+        for tree_id, tree_data in tree_groups.items():
+            print(f"\n{'='*20} Processing Tree {tree_id} {'='*20}")
+
+            # Build structure
+            tree_structure = build_taxonomy_structure(tree_data, args.text_mode, args.is_verbose)
+
+            # Classify nodes
+            node_classification = classify_nodes(tree_structure)
+
+            print(f"Tree structure:")
+            print(f"  Root nodes: {len(node_classification['root'])}")
+            print(f"  Category nodes: {len(node_classification['categories'])}")
+            print(f"  Entity nodes: {len(node_classification['entities'])}")
+
+            # Phase 1: entity embeddings
+            print("\nPhase 1: Extracting entity embeddings...")
+            entity_texts, entity_qids = [], []
+            for qid in node_classification['entities']:
+                if qid in tree_structure['nodes']:
+                    entity_texts.append(build_input_text(tree_structure['nodes'][qid], args.text_mode))
+                    entity_qids.append(qid)
+
+            if entity_texts:
+                entity_tensor = extract_hidden_states(entity_texts, args=args, tokenizer=tokenizer, model=model, device=device)
+                entity_embeddings = {qid: entity_tensor[i] for i, qid in enumerate(entity_qids)}
+            else:
+                entity_embeddings = {}
+
+            # Phase 2: category/root centroids (train-side)
+            print("\nPhase 2: Computing category centroids...")
+            category_centroids, root_centroid = compute_centroids(
+                entity_embeddings,
+                entity_qids,
+                node_classification['category_entities']
             )
-            
-            # Create dict mapping qid to embedding
-            entity_embeddings = {
-                qid: entity_embeddings_tensor[i] 
-                for i, qid in enumerate(entity_qids)
-            }
-        else:
-            entity_embeddings = {}
-        
-        # Phase 2: Compute centroids for categories and root
-        print("\nPhase 2: Computing category centroids...")
-        category_centroids, root_centroid = compute_centroids(
-            entity_embeddings,
-            entity_qids,
-            node_classification['category_entities']
-        )
-        
-        print(f"  Computed centroids for {len(category_centroids)} categories")
-        
-        # Phase 3: Handle tree splitting or save complete tree
-        if args.split_tree:
-            print("\nPhase 3: Splitting tree...")
-            split_trees = split_taxonomy_tree(
-                tree_structure,
-                node_classification,
-                num_splits=args.num_splits,
-                random_seed=args.random_seed
-            )
-            
-            print(f"  Generated {len(split_trees)} tree splits")
-            
-            # Process each split
-            for split_tree in split_trees:
-                split_id = split_tree['split_id']
-                print(f"\n  Processing split {split_id}...")
-                
-                # Build embeddings for this split
+            print(f"  Computed centroids for {len(category_centroids)} categories")
+
+            # Phase 3: split or complete
+            if args.split_tree:
+                print("\nPhase 3: Splitting tree...")
+                split_trees = split_taxonomy_tree(
+                    tree_structure,
+                    node_classification,
+                    num_splits=args.num_splits,
+                    random_seed=args.random_seed
+                )
+                print(f"  Generated {len(split_trees)} tree splits")
+
+                for split_tree in split_trees:
+                    split_id = split_tree['split_id']
+                    print(f"\n  Processing split {split_id}...")
+
+                    embeddings, ordered_nodes = build_final_embeddings(
+                        split_tree,
+                        node_classification,
+                        entity_embeddings,
+                        category_centroids,
+                        root_centroid,
+                        selected_entities=set(split_tree['selected_entities']),
+                        missing_category_policy='error'  # train side shouldn't miss
+                    )
+
+                    distances, _ = calculate_tree_distances(split_tree)
+                    metadata = {
+                        'tree_id': tree_id,
+                        'split_id': split_id,
+                        'nodes': ordered_nodes,
+                        'node_titles': [split_tree['nodes'][n]['title'] for n in ordered_nodes],
+                        'selected_entities': split_tree['selected_entities'],
+                        'text_mode': args.text_mode,
+                        'tree_structure': split_tree,
+                        'distances': distances,
+                        'model_type': args.model_type,
+                        'model_name': args.model_name if args.model_type == 'hf' else args.vector_path,
+                        'num_layers': embeddings.shape[1],
+                        'used_centroids': True,
+                        'full_category_entities': node_classification['category_entities'],
+                        'run_mode': 'train'
+                    }
+                    out_path = os.path.join(output_root, f'tree_{tree_id}_split_{split_id}_embeddings.pt')
+                    save_embeddings(embeddings, metadata, out_path)
+
+            else:
+                print("\nPhase 3: Building complete tree embeddings...")
                 embeddings, ordered_nodes = build_final_embeddings(
-                    split_tree,
+                    tree_structure,
                     node_classification,
                     entity_embeddings,
                     category_centroids,
                     root_centroid,
-                    selected_entities=set(split_tree['selected_entities'])
+                    missing_category_policy='error'
                 )
-                
-                # Calculate distances for this split
-                distances, distance_nodes = calculate_tree_distances(split_tree)
-                
-                # Prepare metadata
+
+                distances, _ = calculate_tree_distances(tree_structure)
                 metadata = {
                     'tree_id': tree_id,
-                    'split_id': split_id,
                     'nodes': ordered_nodes,
-                    'node_titles': [split_tree['nodes'][n]['title'] for n in ordered_nodes],
-                    'selected_entities': split_tree['selected_entities'],
+                    'node_titles': [tree_structure['nodes'][n]['title'] for n in ordered_nodes],
                     'text_mode': args.text_mode,
-                    'tree_structure': split_tree,
+                    'tree_structure': tree_structure,
                     'distances': distances,
                     'model_type': args.model_type,
                     'model_name': args.model_name if args.model_type == 'hf' else args.vector_path,
                     'num_layers': embeddings.shape[1],
                     'used_centroids': True,
-                    'full_category_entities': node_classification['category_entities']
+                    'node_classification': node_classification,
+                    'run_mode': 'train'
                 }
-                
-                # Save embeddings
-                out_path = os.path.join(output_root, f'tree_{tree_id}_split_{split_id}_embeddings.pt')
+                out_path = os.path.join(output_root, f'tree_{tree_id}_embeddings.pt')
                 save_embeddings(embeddings, metadata, out_path)
-        
-        else:
-            print("\nPhase 3: Building complete tree embeddings...")
-            
-            # Build embeddings for complete tree
+
+        print(f"\n✓ All embeddings extracted and saved into {output_root}")
+        return
+
+    # -------------------------
+    # RUN MODE: TEST (new path)
+    # -------------------------
+    if args.run_mode == 'test':
+        # Force-disable split in test mode
+        if args.split_tree:
+            print("[INFO] --split_tree is ignored in test mode.")
+
+        # Validate centroid_data_path
+        if args.centroid_data_path is None:
+            print("[ERROR] In test mode, --centroid_data_path must be provided.")
+            sys.exit(1)
+
+        # Load TEST data
+        test_groups = load_data(args.data_path)
+
+        # Recompute centroids from GOLD (train) data on-the-fly
+        print("\n[TEST] Recomputing centroids from GOLD data...")
+        pre_cat_centroids, pre_root_centroid, gold_stats = recompute_centroids_from_data(
+            args.centroid_data_path, args, tokenizer, model, device, is_verbose=args.is_verbose
+        )
+
+        # Process each TEST tree
+        for tree_id, tree_data in test_groups.items():
+            print(f"\n{'='*20} Processing TEST Tree {tree_id} {'='*20}")
+
+            # Build structure and classify
+            test_struct = build_taxonomy_structure(tree_data, args.text_mode, args.is_verbose)
+            test_cls = classify_nodes(test_struct)
+
+            print(f"TEST Tree structure:")
+            print(f"  Root nodes: {len(test_cls['root'])}")
+            print(f"  Category nodes: {len(test_cls['categories'])}")
+            print(f"  Entity nodes: {len(test_cls['entities'])}")
+
+            # Extract TEST entity embeddings
+            print("\n[TEST] Phase 1: Extracting TEST entity embeddings...")
+            test_entity_texts, test_entity_qids = [], []
+            for qid in test_cls['entities']:
+                if qid in test_struct['nodes']:
+                    test_entity_texts.append(build_input_text(test_struct['nodes'][qid], args.text_mode))
+                    test_entity_qids.append(qid)
+
+            if test_entity_texts:
+                test_entity_tensor = extract_hidden_states(
+                    test_entity_texts, args=args, tokenizer=tokenizer, model=model, device=device
+                )
+                test_entity_embeddings = {qid: test_entity_tensor[i] for i, qid in enumerate(test_entity_qids)}
+            else:
+                test_entity_embeddings = {}
+
+            # Coverage inspection for categories
+            test_cats = set(test_cls['categories'])
+            available_cats = set(pre_cat_centroids.keys())
+            missing_cats = sorted(list(test_cats - available_cats))
+            found_cats = len(test_cats) - len(missing_cats)
+
+            if missing_cats:
+                action = args.missing_category_policy
+                print(f"[TEST] Missing category centroids: {len(missing_cats)} (policy={action})")
+                if action == 'error':
+                    # Fail fast with details
+                    print("[ERROR] The following categories are missing from GOLD centroids:")
+                    for q in missing_cats[:20]:
+                        title = test_struct['nodes'][q]['title'] if q in test_struct['nodes'] else q
+                        print(f"  - {title} ({q})")
+                    if len(missing_cats) > 20:
+                        print(f"  ... and {len(missing_cats)-20} more")
+                    sys.exit(1)
+                # For 'root' and 'skip', build_final_embeddings() will handle assignment/skip.
+
+            # Build final embeddings (categories/root use precomputed from GOLD)
+            print("\n[TEST] Phase 2: Building final TEST embeddings...")
             embeddings, ordered_nodes = build_final_embeddings(
-                tree_structure,
-                node_classification,
-                entity_embeddings,
-                category_centroids,
-                root_centroid
+                test_struct,
+                test_cls,
+                test_entity_embeddings,
+                pre_cat_centroids,
+                pre_root_centroid,
+                selected_entities=None,
+                missing_category_policy=args.missing_category_policy
             )
-            
-            # Calculate distances
-            distances, distance_nodes = calculate_tree_distances(tree_structure)
-            
-            # Prepare metadata
+
+            # Distances on TEST tree (unchanged)
+            distances, _ = calculate_tree_distances(test_struct)
+
+            # Metadata with provenance
             metadata = {
                 'tree_id': tree_id,
                 'nodes': ordered_nodes,
-                'node_titles': [tree_structure['nodes'][n]['title'] for n in ordered_nodes],
+                'node_titles': [test_struct['nodes'][n]['title'] for n in ordered_nodes],
                 'text_mode': args.text_mode,
-                'tree_structure': tree_structure,
+                'tree_structure': test_struct,
                 'distances': distances,
                 'model_type': args.model_type,
                 'model_name': args.model_name if args.model_type == 'hf' else args.vector_path,
                 'num_layers': embeddings.shape[1],
                 'used_centroids': True,
-                'node_classification': node_classification
+                'centroid_source': 'recomputed_from_centroid_data',
+                'centroid_data_path': args.centroid_data_path,
+                'centroid_coverage': {
+                    'test_categories': len(test_cats),
+                    'found': found_cats,
+                    'missing': len(missing_cats),
+                    'policy': args.missing_category_policy,
+                    'missing_list': missing_cats
+                },
+                'gold_stats': gold_stats,
+                'run_mode': 'test'
             }
-            
-            # Save embeddings
-            out_path = os.path.join(output_root, f'tree_{tree_id}_embeddings.pt')
+
+            out_path = os.path.join(output_root, f'tree_{tree_id}_test_embeddings.pt')
             save_embeddings(embeddings, metadata, out_path)
 
-    print(f"\n✓ All embeddings extracted and saved into {output_root}")
-
+        print(f"\n✓ All TEST embeddings extracted and saved into {output_root}")
 
 if __name__ == "__main__":
     main()

@@ -539,8 +539,141 @@ def load_embeddings_with_gold(emb_dir: str, layer: int, probe_type: str, gold_st
             entry["depths"] = depth_vec
 
         print(f"  Prepared {len(centroid_nodes)} nodes (after filtering/alignment)")
+
+
+        # ---- Build gold distance / depth targets restricted to centroid_nodes ----
+        gold_distances = compute_gold_distances(gold_structure)
+        gold_depths    = compute_gold_depths(gold_structure)
+
+        N = len(centroid_nodes)
+        if probe_type == 'distance':
+            dist_mat = torch.full((N, N), float('inf'))
+            for i, ni in enumerate(centroid_nodes):
+                for j, nj in enumerate(centroid_nodes):
+                    d = gold_distances.get((ni, nj), float('inf'))
+                    dist_mat[i, j] = d
+        else:
+            dist_mat = None
+
+        if probe_type == 'depth':
+            depth_vec = torch.full((N,), -1.0)
+            for i, nid in enumerate(centroid_nodes):
+                if nid in gold_depths:
+                    depth_vec[i] = float(gold_depths[nid])
+        else:
+            depth_vec = None
+
+        entry = {
+            "embeddings": centroid_emb,
+            "nodes": centroid_nodes,
+            "node_titles": centroid_titles,
+            "tree_id": tree_id,
+            "hidden_dim": layer_emb.shape[-1],
+            "centroid_debug": debug_info,
+            "gold_structure": gold_structure
+        }
+        if dist_mat is not None:
+            entry["distances"] = dist_mat
+        if depth_vec is not None:
+            entry["depths"] = depth_vec
+
+        # # =========================
+        # # Sanity checks (optional)
+        # # =========================
+        # from collections import defaultdict
+
+        # # Map node id -> index in (original saved order) and in (centroid order)
+        # id2idx_saved = {nid: i for i, nid in enumerate(md["nodes"])}            # for raw layer_emb rows
+        # id2idx_cent  = {nid: i for i, nid in enumerate(centroid_nodes)}         # for centroid_emb rows
+
+        # # Prefer extractor-time mappings for what was actually averaged
+        # # 1) full_category_entities (for split trees) OR
+        # # 2) node_classification['category_entities'] (for non-split)
+        # cls = md.get("node_classification") or {}
+        # catmap = md.get("full_category_entities") or cls.get("category_entities") or {}
+
+        # # Entities set used at extraction time (fallback: union over catmap)
+        # extract_entities = set(cls.get("entities", []))
+        # if not extract_entities and catmap:
+        #     all_ids = set()
+        #     for ids in catmap.values():
+        #         all_ids.update(ids)
+        #     extract_entities = all_ids
+
+        # # Root list from extractor (often length 1)
+        # extract_roots = set(cls.get("root", []))
+
+        # # Counters
+        # num_entities_used   = sum(1 for nid in centroid_nodes if nid in extract_entities)
+        # num_categories_used = sum(1 for nid in centroid_nodes if nid in catmap)
+        # has_root_extractor  = any((r in centroid_nodes) for r in extract_roots)
+
+        # print(f"  [VERIFY/A] nodes: total={len(centroid_nodes)}, "
+        #         f"entities={num_entities_used}, categories={num_categories_used}, "
+        #         f"has_root(extractor)={has_root_extractor}")
+
+        # failures = []
+        # checked = 0
+
+        # def _mean_from_ids(entity_ids):
+        #     """Average raw entity rows from layer_emb given a list of ids."""
+        #     idx = [id2idx_saved[eid] for eid in entity_ids if eid in id2idx_saved]
+        #     if not idx:
+        #         return None, 0, 0  # tensor, matched_count, requested_count
+        #     vec = layer_emb[idx, :].mean(dim=0)
+        #     return vec, len(idx), len(entity_ids)
+
+        # # 1) Verify each category centroid against extractor-time members
+        # for cat_id, members in catmap.items():
+        #     if cat_id not in id2idx_cent:
+        #         continue  # category not present in current centroid set
+
+        #     manual, matched, requested = _mean_from_ids(members)
+        #     if manual is None:
+        #         continue
+
+        #     cat_vec = centroid_emb[id2idx_cent[cat_id]]
+        #     cos = torch.nn.functional.cosine_similarity(
+        #         cat_vec.unsqueeze(0), manual.unsqueeze(0)
+        #     ).item()
+        #     l2 = torch.linalg.vector_norm(cat_vec - manual).item()
+
+        #     checked += 1
+        #     # Tolerances: adjust if you use different dtype/normalization
+        #     if cos < 0.9995 or l2 > 1e-5:
+        #         title = centroid_titles[id2idx_cent[cat_id]]
+        #         failures.append(
+        #             (cos, l2, cat_id, title, matched, requested)
+        #         )
+
+        # # 2) Verify root centroid (if extractor saved one)
+        # for root_id in extract_roots:
+        #     if root_id in id2idx_cent:
+        #         manual, matched, requested = _mean_from_ids(list(extract_entities))
+        #         if manual is not None:
+        #             root_vec = centroid_emb[id2idx_cent[root_id]]
+        #             cos = torch.nn.functional.cosine_similarity(
+        #                 root_vec.unsqueeze(0), manual.unsqueeze(0)
+        #             ).item()
+        #             l2 = torch.linalg.vector_norm(root_vec - manual).item()
+        #             checked += 1
+        #             if cos < 0.9995 or l2 > 1e-5:
+        #                 title = centroid_titles[id2idx_cent[root_id]]
+        #                 failures.append(
+        #                     (cos, l2, root_id, title, matched, requested)
+        #                 )
+
+        # print(f"  [VERIFY/A] checked={checked}, mismatches={len(failures)}")
+        # # Show up to 5 worst cases
+        # for cos, l2, nid, title, matched, requested in sorted(failures, key=lambda x: x[0])[:5]:
+        #     print(f"     - {title} ({nid}): cos={cos:.6f}, L2={l2:.3e}, "
+        #             f"n_desc(matched/requested)={matched}/{requested}")
+
+
+        print(f"  Prepared {len(centroid_nodes)} nodes (after filtering/alignment)")
         data.append(entry)
-        embed()
+
+        # embed()
 
     return data
 
@@ -1305,7 +1438,7 @@ def main():
     if args.vis_path:
         save_mst_html(probe, test_data, device, args.vis_path, args.probe_type, model_name, args.layer, args.probe_rank)
     
-    print("\n✓ Evaluation complete")
+    print("\n✓ Evaluation complete\n\n")
 
 
 if __name__ == "__main__":
